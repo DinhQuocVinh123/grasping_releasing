@@ -33,7 +33,7 @@ MonoBehaviour:
   meshRendererLayer: 21
   overlayDepth: 10
   useOverlay: 1
-  inspectedDataEnabled: 
+  inspectedDataEnabled:
   inspectedDataAssets: []
   useCustomIntegrationConfig: 0
   customIntegrationConfigClassName: 

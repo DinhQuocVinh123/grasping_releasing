@@ -22,6 +22,9 @@ public class GraspLogger : MonoBehaviour
     [Header("Nhãn object đang theo dõi (điền tên object bạn muốn ghi vào cột grabbedObject)")]
     [SerializeField] private string _trackedObjectLabel = "Sphere";
 
+    [Tooltip("Kéo chính GameObject Sphere vào đây — dùng để log parent/vị trí thật của nó mỗi frame, phục vụ điều tra state leak.")]
+    [SerializeField] private Transform _trackedObject;
+
     // Trạng thái grab hiện tại, được set bởi 2 hàm public OnGrabStart/OnGrabEnd
     // mà bạn sẽ nối vào WhenSelect/WhenUnselect của PointableUnityEventWrapper (xem hướng dẫn Inspector).
     private bool _isGrabbing = false;
@@ -55,7 +58,9 @@ public class GraspLogger : MonoBehaviour
             "conf_thumb", "conf_index", "conf_middle", "conf_ring", "conf_pinky",
             "tipdist_thumb", "tipdist_index", "tipdist_middle", "tipdist_ring", "tipdist_pinky",
             "flex_index_mcp", "flex_index_pip", "flex_middle_mcp",
-            "isGrabbing", "grabbedObject"
+            "isGrabbing", "grabbedObject",
+            "objectParent", "objectWorldPos_x", "objectWorldPos_y", "objectWorldPos_z",
+            "handWorldPos_x", "handWorldPos_y", "handWorldPos_z"
         }));
     }
 
@@ -97,6 +102,11 @@ public class GraspLogger : MonoBehaviour
         public float flexIndexMcp;
         public float flexIndexPip;
         public float flexMiddleMcp;
+
+        // Phục vụ điều tra "state leak": vật vẫn dính vào tay dù isGrabbing=false.
+        public string objectParentName; // tên transform cha của vật, "None" nếu không có cha
+        public Vector3 objectWorldPos;  // vị trí thế giới thật của vật (Sphere)
+        public Vector3 handWorldPos;    // vị trí thế giới của cổ tay (đại diện cho vị trí bàn tay)
     }
 
     private static readonly OVRHand.HandFinger[] FingerOrder =
@@ -161,6 +171,23 @@ public class GraspLogger : MonoBehaviour
         data.flexIndexPip = FlexAngleOrZero(indexPip);
         data.flexMiddleMcp = FlexAngleOrZero(middleMcp);
 
+        // Vị trí tay: lấy từ xương cổ tay đã tìm ở trên (độc lập với isTracked -
+        // vẫn ghi được dù đang mất tracking, để so sánh vị trí "đóng băng" cuối cùng).
+        data.handWorldPos = wrist != null ? wrist.position : Vector3.zero;
+
+        // Trạng thái của vật đang theo dõi (Sphere) - ghi dù isGrabbing đang là gì,
+        // để phát hiện trường hợp vật vẫn dính vào tay dù logic game nói là đã thả (state leak).
+        if (_trackedObject != null)
+        {
+            data.objectParentName = _trackedObject.parent != null ? _trackedObject.parent.name : "None";
+            data.objectWorldPos = _trackedObject.position;
+        }
+        else
+        {
+            data.objectParentName = "N/A";
+            data.objectWorldPos = Vector3.zero;
+        }
+
         return true;
     }
 
@@ -215,7 +242,10 @@ public class GraspLogger : MonoBehaviour
             d.fingerConfidence[2].ToString(), d.fingerConfidence[3].ToString(), d.fingerConfidence[4].ToString(),
             F(d.tipDist[0]), F(d.tipDist[1]), F(d.tipDist[2]), F(d.tipDist[3]), F(d.tipDist[4]),
             F(d.flexIndexMcp), F(d.flexIndexPip), F(d.flexMiddleMcp),
-            BoolStr(_isGrabbing), _grabbedObjectName
+            BoolStr(_isGrabbing), _grabbedObjectName,
+            d.objectParentName,
+            F(d.objectWorldPos.x), F(d.objectWorldPos.y), F(d.objectWorldPos.z),
+            F(d.handWorldPos.x), F(d.handWorldPos.y), F(d.handWorldPos.z)
         });
 
         _writer.WriteLine(row);

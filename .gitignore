@@ -68,7 +68,38 @@ crashlytics-build.properties
 
 # ===== Riêng cho project này (file rác sinh ra lúc debug hôm nay) =====
 live_logcat.txt
+live_logcat2.txt
 GraspLog_pulled.csv
 grasping_releasing.apk
 .claude/
 .utmp/
+
+# ===== Rác build của Unity (~1.1 GB) =====
+# Chính Unity đặt tên 2 thư mục này là "ButDontShipItWithYourGame" và "DoNotShip".
+# Chúng được sinh lại mỗi lần build, nên nếu để git theo dõi thì mỗi lần build
+# repo lại có ~800 file thay đổi giả.
+*_BackUpThisFolder_ButDontShipItWithYourGame/
+*_BurstDebugInformation_DoNotShip/
+
+# ===== Không phải mã nguồn (vẫn giữ trên máy, chỉ không đưa lên git) =====
+# Bản cứu hộ scene Unity tự lưu khi crash
+Assets/_Recovery/
+Assets/_Recovery.meta
+# Video quay màn hình kính (~130 MB, có file vượt giới hạn 100 MB của GitHub)
+*.mp4
+# Log thí nghiệm lấy từ kính về (cùng loại với GraspLog_pulled.csv ở trên)
+GraspLog_*.csv
+events_*.csv
+
+# ===== Phần Python =====
+# Môi trường ảo (~5.8 GB) -- tạo lại theo python/requirements.txt
+python/mmpose_venv/
+# Mã nguồn mmpose (~98 MB) -- clone từ repo công khai, xem python/README.md
+python/mmpose/
+# Dữ liệu huấn luyện và model đã train (nặng, và bản fine-tune hiện không dùng)
+python/dataset/
+python/dataset_from_quest/
+python/checkpoints/
+*.pth
+__pycache__/
+*.pyc
