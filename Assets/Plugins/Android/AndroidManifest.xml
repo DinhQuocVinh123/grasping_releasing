@@ -16,9 +16,11 @@
     <meta-data android:name="com.oculus.handtracking.frequency" android:value="LOW" />
   </application>
   <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
-  <horizonos:uses-horizonos-sdk horizonos:minSdkVersion="60" horizonos:targetSdkVersion="205" />
+  <horizonos:uses-horizonos-sdk horizonos:minSdkVersion="74" horizonos:targetSdkVersion="205" />
   <uses-feature android:name="oculus.software.handtracking" android:required="false" />
   <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
   <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
   <uses-permission android:name="com.oculus.permission.USE_SCENE" />
+  <!-- Passthrough Camera API, can cho GloveDatasetCollector.cs (thu du lieu dung camera that cua Quest). Chi ho tro Quest 3/3S, Horizon OS v74+. -->
+  <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
 </manifest>
