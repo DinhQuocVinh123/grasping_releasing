@@ -31,6 +31,9 @@ public class SquishyPinchable : MonoBehaviour
         [Tooltip("Tay tran: LeftThumbTip (do IsdkFingertipProxy cap nhat). Tay gang: XRHand_ThumbTip.")]
         public Transform thumbTip;
         public Transform indexTip;
+        [Tooltip("Tuy chon: co tay cua ban tay nay. Khi dang cam, vat di theo CO TAY (Quest bam 72 lan/giay, rat muot) thay vi theo " +
+                 "diem giua 2 dau ngon (tay gang: chi ~8 lan/giay tu camera, nhay vai mm moi lan). De trong = theo 2 dau ngon nhu cu.")]
+        public Transform wrist;
     }
 
     [Header("Các bàn tay tương tác được")]
@@ -88,8 +91,22 @@ public class SquishyPinchable : MonoBehaviour
     [SerializeField] private ReleaseRule _releaseRule = ReleaseRule.WhenFingersOpen;
     [Tooltip("Voi WhenFingersOpen: 2 ngon mo ra them bao nhieu (met) so voi luc bop chat nhat thi tha. Nho = tha nhay, lon = kho roi hon nhung it bi tha nham khi tay run.")]
     [SerializeField] private float _releaseOpening = 0.01f;
+    [Tooltip("Dieu kien tha phai dung LIEN TUC trong khoang nay (giay) moi tha. Chong tha nham khi vi tri ngon rung/nhay 1-2 khung " +
+             "(tay gang chi co ~8 diem moi giay tu camera, moi lan cap nhat ngon nhay vai mm). 0 = tha ngay.")]
+    [SerializeField] private float _releaseDelay = 0.12f;
     [Tooltip("Khi dang cam, vat truot ve diem giua 2 dau ngon nhanh co nao.")]
     [SerializeField] private float _followSpeed = 12f;
+    [Tooltip("Tay co 'wrist': vat gan cung vao co tay tu luc cam (nhu cam vat that), va chi tu tu truot ve giua 2 dau ngon voi toc do nay " +
+             "(1/giay) -- de sua lech dan ma khong rung theo tung lan dau ngon nhay.")]
+    [SerializeField] private float _recenterSpeed = 2f;
+    [Tooltip("Tay dang cam bi MAT DAU (Quest tat tay) trong thoi gian ngan hon muc nay (giay) thi van giu vat -- tay hien lai la cam tiep. " +
+             "Mat lau hon moi tha.")]
+    [SerializeField] private float _lostGraceSeconds = 0.35f;
+    [Tooltip("Khi dang cam: dat hinh anh dau ngon cai + tro NAM TREN be mat vat (ke ca khi ngon that dang ho ra ngoai), " +
+             "de nhin nhu dang kep that. FingertipSurfaceConstraint thuc hien.")]
+    [SerializeField] private bool _snapHeldFingertips = true;
+    [Tooltip("Dau ngon ho ra ngoai be mat qua khoang nay (met) thi khong keo vao nua.")]
+    [SerializeField] private float _snapMaxGap = 0.03f;
 
     [Header("Khi thả ra")]
     [Tooltip("Vi tri vat quay ve khi khong con bi cam. De trong = vat nam yen o cho vua tha.")]
@@ -138,10 +155,15 @@ public class SquishyPinchable : MonoBehaviour
     private Vector3 _grabAxis;
     private Quaternion _grabRotation;
     private float[] _tightestGap = new float[0]; // moi tay: khoang cach 2 dau ngon nho nhat tu luc bat dau cam
+    private float _releaseTimer;                 // dieu kien tha da dung lien tuc bao lau (giay)
+    private float _lostTimer;                    // tay dang cam da mat dau bao lau (giay)
+    private Vector3 _grabLocalPos;               // vi tri vat trong he toa do co tay (khi tay co wrist)
+    private Quaternion _grabLocalRot;
     private bool[] _regrabBlocked = new bool[0];
 
     // Bo dem dung lai moi khung hinh (tranh tao mang moi)
     private Vector3[] _points = new Vector3[0];
+    private Vector3[] _rawPoints = new Vector3[0]; // vi tri 3D that cua dau ngon (khong chieu theo goc nhin)
     private bool[] _handValid = new bool[0];
 
     private void Awake()
@@ -152,6 +174,14 @@ public class SquishyPinchable : MonoBehaviour
             Transform thumb = FindInScene("XRHand_ThumbTip");
             Transform index = FindInScene("XRHand_IndexTip");
             if (thumb != null && index != null) _hands = new[] { new Hand { thumbTip = thumb, indexTip = index } };
+        }
+        // Tay gang (XRHand_*): co tay la to tien ten "...Wrist" cua dau ngon -- tu dien neu de trong.
+        for (int h = 0; h < _hands.Length; h++)
+        {
+            if (_hands[h].wrist != null || _hands[h].thumbTip == null) continue;
+            Transform t = _hands[h].thumbTip.parent;
+            while (t != null && !t.name.Contains("Wrist")) t = t.parent;
+            _hands[h].wrist = t;
         }
         if (_viewReference == null)
         {
@@ -189,6 +219,7 @@ public class SquishyPinchable : MonoBehaviour
         _indent = new float[points];
         _indentVel = new float[points];
         _points = new Vector3[points];
+        _rawPoints = new Vector3[points];
         _tightestGap = new float[hands];
         _regrabBlocked = new bool[hands];
         _handValid = new bool[hands];
@@ -284,6 +315,8 @@ public class SquishyPinchable : MonoBehaviour
             if (!_handValid[h]) continue;
             _points[2 * h] = MeasurePoint(thumb);
             _points[2 * h + 1] = MeasurePoint(index);
+            _rawPoints[2 * h] = thumb.position;
+            _rawPoints[2 * h + 1] = index.position;
         }
 
         StepHands(dt);
@@ -327,6 +360,8 @@ public class SquishyPinchable : MonoBehaviour
     {
         EnsureHandState();
         _heldBy = -1;
+        _releaseTimer = 0f;
+        _lostTimer = 0f;
         for (int h = 0; h < _regrabBlocked.Length; h++) _regrabBlocked[h] = false;
         for (int k = 0; k < _indent.Length; k++)
         {
@@ -357,6 +392,16 @@ public class SquishyPinchable : MonoBehaviour
         return true;
     }
 
+    /// <summary>Huong phap tuyen (the gioi, huong RA NGOAI vat) tai cho dau ngon
+    /// cham -- huong luc vat day nguoc len ngon. Xap xi bang huong tu tam vat toi
+    /// dau ngon (dung voi vat tron nhu qua bong).</summary>
+    public Vector3 ContactNormal(Transform tip)
+    {
+        if (tip == null) return Vector3.up;
+        Vector3 d = MeasurePoint(tip) - transform.TransformPoint(_center);
+        return d.sqrMagnitude > 1e-12f ? d.normalized : Vector3.up;
+    }
+
     /// <summary>Vat co dang bi CHINH ban tay chua dau ngon nay cam khong.
     /// Dau ngon khong thuoc tay nao trong _hands -> chi can vat dang bi cam.</summary>
     public bool IsHeldBy(Transform tip)
@@ -366,6 +411,36 @@ public class SquishyPinchable : MonoBehaviour
         {
             if (_hands[h].thumbTip == tip || _hands[h].indexTip == tip) return h == _heldBy;
         }
+        return true;
+    }
+
+    /// <summary>Dau ngon nay thuoc tay DANG CAM vat khong (tay la -> false,
+    /// khac IsHeldBy).</summary>
+    public bool IsHoldingTip(Transform tip)
+    {
+        if (_heldBy < 0 || tip == null || _hands == null || _heldBy >= _hands.Length) return false;
+        return _hands[_heldBy].thumbTip == tip || _hands[_heldBy].indexTip == tip;
+    }
+
+    /// <summary>Khi dang cam: diem tren be mat HIEN TAI (da lun) ma hinh anh dau
+    /// ngon nen nam -- ca khi ngon that da lot vao trong LAN khi dang ho ra ngoai
+    /// (toi _snapMaxGap). Tinh trong 3D that de nhin bang ca 2 mat deu thay ngon
+    /// cham vat. Vi tri ngon that (du lieu) khong doi -> muc bop/luc van dung.</summary>
+    /// <param name="handTip">Transform dau ngon ma vat dang doc (trong _hands).</param>
+    /// <param name="visualTipWorld">Vi tri dau ngon cua HINH ANH tay (co the la bo xuong khac, vd tay tran).</param>
+    public bool TryGetHeldContact(Transform handTip, Vector3 visualTipWorld, out Vector3 contactWorld)
+    {
+        contactWorld = visualTipWorld;
+        if (!_snapHeldFingertips || _baseVertices == null || !IsHoldingTip(handTip)) return false;
+
+        float scale = transform.lossyScale.x;
+        Vector3 local = transform.InverseTransformPoint(visualTipWorld) - _center;
+        float dist = local.magnitude;
+        if (dist < 1e-6f) return false;
+        Vector3 dir = local / dist;
+        float onSurface = CurrentSurfaceRadius(dir) + _fingerRadius / scale;
+        if ((dist - onSurface) * scale > _snapMaxGap) return false; // ho qua xa -> sap tha, de yen
+        contactWorld = transform.TransformPoint(_center + dir * onSurface);
         return true;
     }
 
@@ -443,8 +518,8 @@ public class SquishyPinchable : MonoBehaviour
             EnsureHandState();
         }
         for (int h = 0; h < _handValid.Length; h++) _handValid[h] = h == 0;
-        _points[0] = thumbWorld;
-        _points[1] = indexWorld;
+        _points[0] = _rawPoints[0] = thumbWorld;
+        _points[1] = _rawPoints[1] = indexWorld;
         StepHands(dt);
     }
 
@@ -469,8 +544,11 @@ public class SquishyPinchable : MonoBehaviour
         if (_heldBy >= 0)
         {
             int h = _heldBy;
-            bool release = !_handValid[h]; // mat dau tay -> tha
-            if (!release)
+            // Mat dau tay: giu vat them _lostGraceSeconds (tay hay mat 1 chut khi
+            // xoay/che khuat), qua lau moi tha.
+            _lostTimer = _handValid[h] ? 0f : _lostTimer + dt;
+            bool release = _lostTimer > _lostGraceSeconds;
+            if (_handValid[h])
             {
                 float gap = Vector3.Distance(_points[2 * h], _points[2 * h + 1]);
                 _tightestGap[h] = Mathf.Min(_tightestGap[h], gap);
@@ -479,14 +557,25 @@ public class SquishyPinchable : MonoBehaviour
                 // Nguong THA phai rong hon nguong CAM (_grabMargin): neu khong, ngon
                 // vua lot vao vung cam da nam ngoai vung tha -> cam roi tha ngay.
                 bool widerThanObject = gap > 2f * (_radius * scale + _fingerRadius + _grabMargin + _releaseMargin);
-                // 2 ngon da bat dau mo ra so voi luc bop chat nhat -> nguoi dung muon tha
-                bool opening = _releaseRule == ReleaseRule.WhenFingersOpen && gap > _tightestGap[h] + _releaseOpening;
+                // 2 ngon da bat dau mo ra so voi luc bop chat nhat -> nguoi dung muon tha.
+                // Moc "chat nhat" khong duoc nho hon muc vat LUN TOI DA: ngon that bop
+                // xuyen sau vao vat (do bang glove_diag: 2 dau ngon con 2-4 cm trong khi
+                // vat 6 cm chi lun duoc ~1.5 cm), neu lay moc do thi chi can noi tay 1 cm
+                // -- van con an sau trong vat -- la vat da roi.
+                float squeezedGap = 2f * (_radius * scale + _fingerRadius - MaxIndentMeters);
+                float tightest = Mathf.Max(_tightestGap[h], squeezedGap);
+                bool opening = _releaseRule == ReleaseRule.WhenFingersOpen && gap > tightest + _releaseOpening;
                 release = widerThanObject || opening;
+                // Phai mo lien tuc mot chut moi tha (xem _releaseDelay).
+                _releaseTimer = release ? _releaseTimer + dt : 0f;
+                release = _releaseTimer >= _releaseDelay;
             }
 
             if (release)
             {
                 _heldBy = -1;
+                _releaseTimer = 0f;
+                _lostTimer = 0f;
                 _regrabBlocked[h] = _handValid[h];
             }
         }
@@ -520,14 +609,38 @@ public class SquishyPinchable : MonoBehaviour
             else if (canGrab && _heldBy < 0)
             {
                 _heldBy = h;
+                _releaseTimer = 0f;
                 _grabAxis = (index - thumb).normalized;
                 _grabRotation = transform.rotation;
                 _tightestGap[h] = Vector3.Distance(thumb, index);
+                Transform wrist = _hands[h].wrist;
+                if (wrist != null)
+                {
+                    _grabLocalPos = wrist.InverseTransformPoint(transform.position);
+                    _grabLocalRot = Quaternion.Inverse(wrist.rotation) * transform.rotation;
+                }
             }
         }
 
         float follow = 1f - Mathf.Exp(-_followSpeed * dt);
-        if (_heldBy >= 0)
+        Transform heldWrist = _heldBy >= 0 ? _hands[_heldBy].wrist : null;
+        if (heldWrist != null)
+        {
+            // Gan vao co tay nhu cam vat that: di chuyen/xoay dung theo co tay, khong
+            // tre, khong rung theo dau ngon. Mat dau tay (Quest tat co tay) thi vat
+            // dung yen cho toi khi tay hien lai.
+            if (_handValid[_heldBy] && heldWrist.gameObject.activeInHierarchy)
+            {
+                // Tu tu truot ve giua 2 dau ngon (sua lech, vd khi doi cach kep). Dung vi
+                // tri 3D THAT (ke ca tay gang) de sua ca lech chieu sau; truot cham nen
+                // nhieu chieu sau cua tay gang duoc lay trung binh.
+                Vector3 mid = (_rawPoints[2 * _heldBy] + _rawPoints[2 * _heldBy + 1]) * 0.5f;
+                Vector3 wanted = heldWrist.InverseTransformPoint(mid + (transform.position - centerWorld));
+                _grabLocalPos = Vector3.Lerp(_grabLocalPos, wanted, 1f - Mathf.Exp(-_recenterSpeed * dt));
+                transform.SetPositionAndRotation(heldWrist.TransformPoint(_grabLocalPos), heldWrist.rotation * _grabLocalRot);
+            }
+        }
+        else if (_heldBy >= 0 && _handValid[_heldBy])
         {
             // Vat truot ve giua 2 dau ngon, va xoay theo truc noi 2 dau ngon
             // (nhu vat bi kep that xoay theo tay).
@@ -543,7 +656,7 @@ public class SquishyPinchable : MonoBehaviour
                 transform.rotation = Quaternion.FromToRotation(_grabAxis, axis.normalized) * _grabRotation;
             }
         }
-        else if (_home != null)
+        else if (_heldBy < 0 && _home != null) // dang cam ma tay tam mat dau -> dung yen, khong quay ve
         {
             float back = 1f - Mathf.Exp(-_returnSpeed * dt);
             transform.position = Vector3.Lerp(transform.position, _home.position, back);

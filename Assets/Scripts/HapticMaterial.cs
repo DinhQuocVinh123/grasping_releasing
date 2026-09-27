@@ -17,6 +17,12 @@ public class HapticMaterial : MonoBehaviour
     [SerializeField] private float _pressureAtMaxIndent = 0.6f;
     [Tooltip("Sau khi vat da lun toi da ma ngon THAT van an tiep (vat 'cham day'), luc tang tiep tu muc tren len 1.0 trong khoang nay (met). Nho = cam giac cham day dot ngot, cung.")]
     [SerializeField] private float _extraDepthToFullPressure = 0.01f;
+    [Tooltip("Luc THAT (Newton) ung voi luc = 1.0 -- de doi muc luc 0..1 sang Newton cho actuator (GloveForceOutput). " +
+             "Bong mem vai N; can dat nho hon luc toi da an toan cua actuator.")]
+    [SerializeField] private float _maxForceNewton = 4f;
+
+    /// <summary>Luc that (N) ung voi muc luc 1.0.</summary>
+    public float MaxForceNewton => _maxForceNewton;
 
     [Header("Xung rung khi chạm")]
     [Tooltip("Xung luc da ngon vua cham be mat. Bien do nay ung voi cu cham NHANH; cham cham thi xung nho lai (xem ben duoi).")]

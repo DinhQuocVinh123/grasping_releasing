@@ -675,8 +675,10 @@ MonoBehaviour:
   _hands:
   - thumbTip: {fileID: 1977105788}
     indexTip: {fileID: 512854270}
+    wrist: {fileID: 1718872828}
   - thumbTip: {fileID: 595217004}
     indexTip: {fileID: 595217003}
+    wrist: {fileID: 595217005}
   _thumbTip: {fileID: 0}
   _indexTip: {fileID: 0}
   _measureInViewPlane: 1
@@ -691,7 +693,12 @@ MonoBehaviour:
   _releaseMargin: 0.01
   _releaseRule: 0
   _releaseOpening: 0.01
+  _releaseDelay: 0.12
   _followSpeed: 12
+  _recenterSpeed: 2
+  _lostGraceSeconds: 0.35
+  _snapHeldFingertips: 1
+  _snapMaxGap: 0.03
   _home: {fileID: 941096313}
   _returnSpeed: 6
 --- !u!23 &258154971
@@ -760,7 +767,7 @@ Transform:
   m_GameObject: {fileID: 258154969}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.153, y: 0.056, z: 0.35}
+  m_LocalPosition: {x: -0.05, y: -0.15, z: 0.35}
   m_LocalScale: {x: 0.06, y: 0.06, z: 0.06}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -780,6 +787,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::HapticMaterial
   _pressureAtMaxIndent: 0.6
   _extraDepthToFullPressure: 0.01
+  _maxForceNewton: 4
   _touch:
     amplitude: 0.8
     frequencyHz: 120
@@ -1338,6 +1346,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::HapticMaterial
   _pressureAtMaxIndent: 0.6
   _extraDepthToFullPressure: 0.01
+  _maxForceNewton: 4
   _touch:
     amplitude: 0.8
     frequencyHz: 120
@@ -1371,6 +1380,7 @@ MonoBehaviour:
   _hands:
   - thumbTip: {fileID: 1977105788}
     indexTip: {fileID: 512854270}
+    wrist: {fileID: 0}
   _thumbTip: {fileID: 0}
   _indexTip: {fileID: 0}
   _measureInViewPlane: 0
@@ -1385,7 +1395,12 @@ MonoBehaviour:
   _releaseMargin: 0.01
   _releaseRule: 0
   _releaseOpening: 0.01
+  _releaseDelay: 0.12
   _followSpeed: 12
+  _recenterSpeed: 2
+  _lostGraceSeconds: 0.35
+  _snapHeldFingertips: 1
+  _snapMaxGap: 0.03
   _home: {fileID: 598843031}
   _returnSpeed: 6
 --- !u!23 &565819990
@@ -1473,6 +1488,18 @@ PrefabInstance:
     serializedVersion: 3
     m_TransformParent: {fileID: 996359548}
     m_Modifications:
+    - target: {fileID: 1652949600957698967, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
+      propertyPath: m_LocalRotation.x
+      value: -0
+      objectReference: {fileID: 0}
+    - target: {fileID: 1652949600957698967, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
+      propertyPath: m_LocalRotation.y
+      value: -0
+      objectReference: {fileID: 0}
+    - target: {fileID: 1652949600957698967, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
+      propertyPath: m_LocalRotation.z
+      value: -0
+      objectReference: {fileID: 0}
     - target: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       propertyPath: m_Name
       value: StaticHandModel_Right
@@ -1571,7 +1598,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4718985949685268679, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       propertyPath: m_LocalRotation.x
-      value: 0.010207704
+      value: 0.010207712
       objectReference: {fileID: 0}
     - target: {fileID: 4718985949685268679, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       propertyPath: m_LocalRotation.y
@@ -1579,7 +1606,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4718985949685268679, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       propertyPath: m_LocalRotation.z
-      value: -0.05007341
+      value: -0.05007344
       objectReference: {fileID: 0}
     - target: {fileID: 4718985949685268679, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       propertyPath: m_LocalEulerAnglesHint.x
@@ -1624,6 +1651,9 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       insertIndex: -1
       addedObject: {fileID: 807227422}
+    - targetCorrespondingSourceObject: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 807227423}
   m_SourcePrefab: {fileID: 100100000, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
 --- !u!4 &595217002 stripped
 Transform:
@@ -1945,8 +1975,10 @@ MonoBehaviour:
   _preserveRestDepth: 0
   _useAnatomicalFit: 1
   _leftHand: 0
+  _logDiagnostics: 1
   _fallbackBlendSeconds: 0.15
   _dataTimeoutSeconds: 0.5
+  _holdPoseWhileGraspingSeconds: 1.5
   _curlAxis: 0
   _invert: 0
   _thumbCurlAxis: 0
@@ -1978,6 +2010,10 @@ MonoBehaviour:
   _camHeadRotX: 283.7
   _camHeadRotY: 14.4
   _camHeadRotZ: 339.9
+  _useCameraAxes: 1
+  _pinchNearOnImage: 0.2
+  _pinchFarOnImage: 0.45
+  _pinchContactDistance: 0.016
 --- !u!114 &807227417
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2027,6 +2063,8 @@ MonoBehaviour:
   - {fileID: 258154970}
   _iterations: 4
   _thumbAndIndexOnly: 0
+  _dataThumbTip: {fileID: 0}
+  _dataIndexTip: {fileID: 0}
 --- !u!114 &807227420
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2052,10 +2090,12 @@ MonoBehaviour:
     depthMeters: 0
     pressure01: 0
     touchedObject: {fileID: 0}
+    forceNewton: {x: 0, y: 0, z: 0}
   - touching: 0
     depthMeters: 0
     pressure01: 0
     touchedObject: {fileID: 0}
+    forceNewton: {x: 0, y: 0, z: 0}
 --- !u!114 &807227421
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2091,6 +2131,26 @@ MonoBehaviour:
   _lightColor: {r: 1, g: 0.55, b: 0.55, a: 0.35}
   _deepColor: {r: 0.7, g: 0, b: 0, a: 0.9}
   _flashSeconds: 0.15
+--- !u!114 &807227423
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 807227412}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 74ea02aa003ff9740922153d62233815, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GloveForceOutput
+  _haptics: {fileID: 807227420}
+  _fingers: {fileID: 807227416}
+  _handFrame: {fileID: 0}
+  _targetIp: 
+  _targetPort: 5010
+  _streamer: {fileID: 919236456}
+  _sendRateHz: 60
+  _safetyMaxNewton: 6
 --- !u!1 &832575517
 GameObject:
   m_ObjectHideFlags: 0
@@ -2562,6 +2622,10 @@ MonoBehaviour:
   _sendIntervalSeconds: 0.05
   _jpegQuality: 80
   _imageIsBottomUp: 1
+  _sendHandHint: 1
+  _gloveHandVisual: {fileID: 0}
+  _handCenter: {fileID: 0}
+  _handWrist: {fileID: 0}
   _statusText: {fileID: 0}
 --- !u!4 &919236457
 Transform:
@@ -2614,6 +2678,8 @@ MonoBehaviour:
   - {fileID: 258154970}
   _iterations: 4
   _thumbAndIndexOnly: 0
+  _dataThumbTip: {fileID: 1977105788}
+  _dataIndexTip: {fileID: 512854270}
 --- !u!4 &929318446 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 6147449420076126336, guid: 0a7d2469f24041c4284c66706f84c45e, type: 3}
@@ -3370,6 +3436,7 @@ Transform:
   m_Children:
   - {fileID: 1977105788}
   - {fileID: 512854270}
+  - {fileID: 1718872828}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!114 &1200314403
@@ -3387,6 +3454,7 @@ MonoBehaviour:
   _hand: {fileID: 844853068}
   _thumbTip: {fileID: 1977105788}
   _indexTip: {fileID: 512854270}
+  _wrist: {fileID: 1718872828}
 --- !u!114 &1200314404
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3416,10 +3484,12 @@ MonoBehaviour:
     depthMeters: 0
     pressure01: 0
     touchedObject: {fileID: 0}
+    forceNewton: {x: 0, y: 0, z: 0}
   - touching: 0
     depthMeters: 0
     pressure01: 0
     touchedObject: {fileID: 0}
+    forceNewton: {x: 0, y: 0, z: 0}
 --- !u!114 &1200314405
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3651,6 +3721,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::HapticMaterial
   _pressureAtMaxIndent: 0.6
   _extraDepthToFullPressure: 0.01
+  _maxForceNewton: 4
   _touch:
     amplitude: 0.8
     frequencyHz: 120
@@ -3684,6 +3755,7 @@ MonoBehaviour:
   _hands:
   - thumbTip: {fileID: 1977105788}
     indexTip: {fileID: 512854270}
+    wrist: {fileID: 0}
   _thumbTip: {fileID: 0}
   _indexTip: {fileID: 0}
   _measureInViewPlane: 0
@@ -3698,7 +3770,12 @@ MonoBehaviour:
   _releaseMargin: 0.01
   _releaseRule: 0
   _releaseOpening: 0.01
+  _releaseDelay: 0.12
   _followSpeed: 12
+  _recenterSpeed: 2
+  _lostGraceSeconds: 0.35
+  _snapHeldFingertips: 1
+  _snapMaxGap: 0.03
   _home: {fileID: 972339806}
   _returnSpeed: 6
 --- !u!23 &1337383836
@@ -4036,6 +4113,37 @@ Transform:
   m_CorrespondingSourceObject: {fileID: 2633003651221549796, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
   m_PrefabInstance: {fileID: 595217001}
   m_PrefabAsset: {fileID: 0}
+--- !u!1 &1718872827
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1718872828}
+  m_Layer: 0
+  m_Name: LeftWrist
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1718872828
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1718872827}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 1200314402}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1760019510
 GameObject:
   m_ObjectHideFlags: 0
@@ -4106,6 +4214,7 @@ MonoBehaviour:
   _hands:
   - thumbTip: {fileID: 1977105788}
     indexTip: {fileID: 512854270}
+    wrist: {fileID: 0}
   _thumbTip: {fileID: 0}
   _indexTip: {fileID: 0}
   _measureInViewPlane: 0
@@ -4120,7 +4229,12 @@ MonoBehaviour:
   _releaseMargin: 0.01
   _releaseRule: 0
   _releaseOpening: 0.01
+  _releaseDelay: 0.12
   _followSpeed: 12
+  _recenterSpeed: 2
+  _lostGraceSeconds: 0.35
+  _snapHeldFingertips: 1
+  _snapMaxGap: 0.03
   _home: {fileID: 942543321}
   _returnSpeed: 6
 --- !u!23 &1795167298
@@ -4209,6 +4323,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::HapticMaterial
   _pressureAtMaxIndent: 0.6
   _extraDepthToFullPressure: 0.01
+  _maxForceNewton: 4
   _touch:
     amplitude: 0.8
     frequencyHz: 120

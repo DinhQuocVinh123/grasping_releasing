@@ -43,6 +43,8 @@ public class HapticRenderer : MonoBehaviour
         public float depthMeters;
         public float pressure01;
         public SquishyPinchable touchedObject;
+        [Tooltip("Luc vat day nguoc len ngon (Newton, toa do the gioi): huong theo phap tuyen be mat, do lon = muc luc x MaxForceNewton cua vat.")]
+        public Vector3 forceNewton;
     }
 
     [Header("Chỉ đọc (xem trong Play mode)")]
@@ -117,6 +119,10 @@ public class HapticRenderer : MonoBehaviour
         state.pressure01 = touching && deepest != null
             ? MaterialOf(deepest).PressureFromDepth(depth, deepest.MaxIndentMeters)
             : 0f;
+        // Vector luc (god-object): vat day ngon RA NGOAI theo phap tuyen, do lon ti le muc luc.
+        state.forceNewton = touching && deepest != null
+            ? deepest.ContactNormal(tip) * (state.pressure01 * MaterialOf(deepest).MaxForceNewton)
+            : Vector3.zero;
         _state[f] = state;
         _previousDepth[f] = tipValid ? depth : float.NegativeInfinity;
 
