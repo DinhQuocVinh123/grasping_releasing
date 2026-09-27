@@ -29,6 +29,10 @@ public class FingertipSurfaceConstraint : MonoBehaviour
     [SerializeField] private int _iterations = 4;
     [Tooltip("Chi xu ly ngon cai + ngon tro (2 ngon dung de bop). Tat = xu ly ca 5 ngon.")]
     [SerializeField] private bool _thumbAndIndexOnly = false;
+    [Tooltip("Transform dau ngon cai/tro ma vat DOC de biet tay nay dang cam (vd LeftThumbTip cua IsdkFingertipProxy). " +
+             "De trong = chinh XRHand_ThumbTip/IndexTip cua ban tay nay (tay gang). Khi dang cam, 2 dau ngon nay duoc dat nam tren be mat vat.")]
+    [SerializeField] private Transform _dataThumbTip;
+    [SerializeField] private Transform _dataIndexTip;
 
     // Moi ngon: cac dot xuong xoay duoc (tu goc ra ngoai) + diem dau ngon.
     private static readonly string[][] ChainNames =
@@ -79,11 +83,15 @@ public class FingertipSurfaceConstraint : MonoBehaviour
             Transform[] chain = _chains[f];
             if (chain == null) continue;
             Transform tip = chain[chain.Length - 1];
+            // Ngon cai / tro cua tay DANG CAM: luon dat tren be mat (xuyen vao hay ho ra deu sua).
+            Transform dataTip = f == 0 ? (_dataThumbTip != null ? _dataThumbTip : tip)
+                              : f == 1 ? (_dataIndexTip != null ? _dataIndexTip : tip) : null;
 
             foreach (var obj in objects)
             {
                 if (obj == null || !obj.isActiveAndEnabled) continue;
-                if (obj.TryResolvePenetration(tip, out Vector3 target))
+                if ((dataTip != null && obj.TryGetHeldContact(dataTip, tip.position, out Vector3 target)) ||
+                    obj.TryResolvePenetration(tip, out target))
                 {
                     SolveCcd(chain, target);
                     ConstrainedFingerCount++;
