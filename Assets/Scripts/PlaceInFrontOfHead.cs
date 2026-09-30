@@ -23,6 +23,8 @@ public class PlaceInFrontOfHead : MonoBehaviour
     [SerializeField] private bool _recenterWithButton = true;
     [Tooltip("Cac vat duoc dua NGAY ve cho moi (khong bay tu tu) moi khi dat lai.")]
     [SerializeField] private SquishyPinchable[] _snapObjects;
+    [Tooltip("Vat dung physics (PhysicsPinchGrabbable) dua ve cho cu moi khi dat lai.")]
+    [SerializeField] private PhysicsPinchGrabbable[] _snapBodies;
 
     private IEnumerator Start()
     {
@@ -54,10 +56,11 @@ public class PlaceInFrontOfHead : MonoBehaviour
             _head.position + right * _offset.x + Vector3.up * _offset.y + forward * _offset.z,
             Quaternion.LookRotation(forward, Vector3.up));
 
-        if (_snapObjects == null) return;
-        foreach (var obj in _snapObjects)
-        {
-            if (obj != null) obj.ResetState();
-        }
+        if (_snapObjects != null)
+            foreach (var obj in _snapObjects)
+                if (obj != null) obj.ResetState();
+        if (_snapBodies != null)
+            foreach (var body in _snapBodies)
+                if (body != null) body.ResetToHome();
     }
 }
