@@ -1804,6 +1804,9 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       insertIndex: -1
       addedObject: {fileID: 807227423}
+    - targetCorrespondingSourceObject: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 807227424}
   m_SourcePrefab: {fileID: 100100000, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
 --- !u!4 &595217002 stripped
 Transform:
@@ -1919,6 +1922,7 @@ MonoBehaviour:
   _lostGraceSeconds: 0.35
   _frictionConeDeg: 45
   _recenterSpeed: 3
+  _contactSlideSpeed: 4
   _followSpeed: 20
   _throwWindow: 0.1
   _throwScale: 1
@@ -2041,6 +2045,52 @@ Transform:
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0.09, y: -0.197, z: 0.35}
   m_LocalScale: {x: 0.035, y: 0.035, z: 0.035}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &717762663
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 717762665}
+  - component: {fileID: 717762664}
+  m_Layer: 0
+  m_Name: HandPoseRecorder
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &717762664
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 717762663}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9454d0795555514469a57bbe75f7c759, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::HandPoseRecorder
+  _record: 1
+  _hands: []
+--- !u!4 &717762665
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 717762663}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -2293,50 +2343,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FingerUDPReceiver
   _port: 5005
   _handVisual: {fileID: 807227418}
-  _useBackboneRetarget: 1
-  _viewReference: {fileID: 0}
-  _preserveRestDepth: 0
-  _useAnatomicalFit: 1
   _leftHand: 0
   _logDiagnostics: 1
-  _fallbackBlendSeconds: 0.15
   _dataTimeoutSeconds: 0.5
   _holdPoseWhileGraspingSeconds: 1.5
-  _curlAxis: 0
-  _invert: 0
-  _thumbCurlAxis: 0
-  _thumbInvert: 0
-  _amplitudeDegrees: 70
-  _thumbSpreadAxis: 1
-  _thumbSpreadInvert: 0
-  _thumbSpreadAmplitudeDegrees: 45
-  _applyThumbSpread: 1
-  _proximalCurlRatio: 1
-  _intermediateCurlRatio: 0.85
-  _distalCurlRatio: 0.6
-  _pinchIndexAngles: {x: 30, y: 25, z: 15}
-  _pinchThumbAngles: {x: 20, y: 35, z: 10}
-  _pinchSmoothing: 0.3
-  _pinchBlendStartThreshold: 0.75
-  _smoothing: 0.5
-  _deadzone: 0.049999997
-  _applyRotation: 0
-  _rotationSign: {x: 1, y: 1, z: 1}
-  _rotationSmoothing: 0.6
-  _applyPosition: 0
-  _positionSign: {x: 1, y: -1, z: 1}
-  _positionScale: 0.01
-  _positionSmoothing: 0.6
-  _camHeadPosX: 0.044
-  _camHeadPosY: -0.036
-  _camHeadPosZ: 0.113
-  _camHeadRotX: 283.7
-  _camHeadRotY: 14.4
-  _camHeadRotZ: 339.9
-  _useCameraAxes: 1
-  _pinchNearOnImage: 0.2
-  _pinchFarOnImage: 0.45
-  _pinchContactDistance: 0.016
+  _keepOtherFingersClosed: 1
+  _closedFingerAngles: {x: 75, y: 95, z: 60}
 --- !u!114 &807227417
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2479,6 +2491,29 @@ MonoBehaviour:
   _streamer: {fileID: 919236456}
   _sendRateHz: 60
   _safetyMaxNewton: 6
+--- !u!114 &807227424
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 807227412}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5004dbfa3317f514c8b8fc64fbfc862e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ImageHandSolver
+  _displaySeconds: 0.06
+  _switchSeconds: 0.3
+  _holdSeconds: 1
+  _blendSeconds: 0.3
+  _depthPriorSeconds: 0.6
+  _rotPriorSeconds: 0.3
+  _warmSeconds: 0.5
+  _minConfidence: 0.2
+  _thumbBaseWeight: 0.5
+  _useQuestRotation: 0
+  _useDorsalTiles: 0
 --- !u!1 &832575517
 GameObject:
   m_ObjectHideFlags: 0
@@ -5322,3 +5357,4 @@ SceneRoots:
   - {fileID: 565819992}
   - {fileID: 941096313}
   - {fileID: 670765463}
+  - {fileID: 717762665}
