@@ -831,7 +831,7 @@ MonoBehaviour:
     wrist: {fileID: 595217005}
   _thumbTip: {fileID: 0}
   _indexTip: {fileID: 0}
-  _measureInViewPlane: 1
+  _measureInViewPlane: 0
   _viewReference: {fileID: 996359548}
   _fingerRadius: 0.008
   _maxIndent: 0.25
@@ -2514,6 +2514,7 @@ MonoBehaviour:
   _thumbBaseWeight: 0.5
   _useQuestRotation: 0
   _useDorsalTiles: 0
+  _useLeftHandScale: 1
 --- !u!1 &832575517
 GameObject:
   m_ObjectHideFlags: 0
