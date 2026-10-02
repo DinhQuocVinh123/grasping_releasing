@@ -50,8 +50,10 @@ public class SquishyPinchable : MonoBehaviour
              "BAT (nen dung): bo qua chieu sau khi do dau ngon co cham vat khong -- keo 2 dau ngon ve CUNG DO SAU voi vat roi moi tinh.\n\n" +
              "Ly do: du lieu tu camera chi co 2D, va khi tat Preserve Rest Depth moi ngon ao nam phang o do sau cua goc ngon do -- goc ngon cai " +
              "gan mat hon goc ngon tro ~5 cm. Nhin tu mat thi 2 dau ngon cham nhau, nhung trong 3D chung van lech nhau ~5 cm theo chieu sau, " +
-             "nen neu do khoang cach 3D thi vat khong bao gio thay minh bi kep.")]
-    [SerializeField] private bool _measureInViewPlane = true;
+             "nen neu do khoang cach 3D thi vat khong bao gio thay minh bi kep.\n\n" +
+             "TAT tu 02/10: ImageHandSolver da dung tay gang 3D (co do sau) -- bat thi bong bo qua do sau, " +
+             "tay gan hay xa mat deu cham duoc; khoi cube (PhysicsPinchGrabbable) von do 3D.")]
+    [SerializeField] private bool _measureInViewPlane = false;
     [Tooltip("Transform dai dien cho mat nguoi xem. De trong = parent cua ban tay (CenterEyeAnchor).")]
     [SerializeField] private Transform _viewReference;
 
