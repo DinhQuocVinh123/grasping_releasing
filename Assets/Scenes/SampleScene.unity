@@ -2503,7 +2503,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5004dbfa3317f514c8b8fc64fbfc862e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ImageHandSolver
-  _displaySeconds: 0.06
+  _displaySeconds: 0.02
+  _minCutoff: 0.7
+  _betaPosition: 80
+  _betaRotation: 0.1
+  _betaAngle: 0.05
+  _speedCutoff: 1
+  _extrapolate: 1
+  _extrapolateRotation: 0.5
+  _maxExtrapolateSeconds: 0.06
   _switchSeconds: 0.3
   _holdSeconds: 1
   _blendSeconds: 0.3

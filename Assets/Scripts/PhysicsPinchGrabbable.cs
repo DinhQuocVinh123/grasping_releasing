@@ -374,8 +374,19 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return (inside ? -d : d) - _fingerRadius;
     }
 
+    /// <summary>Be day vat giua 2 ngon + 2 lan ban kinh ngon (met) = khe 2 dau ngon khi vua cham 2 mat.
+    /// Hop dang kep 2 mat doi dien: lay be day hop theo truc kep (co dinh). Truoc day lay 2 diem be mat
+    /// gan moi ngon nhat -- ngon that bop sau vao trong hop (khong co gi chan) thi 2 diem do roi sang mat
+    /// ben canh, "be day" teo con ~1-2 cm, moc tha tut theo -> chi noi tay nhe (khe van &lt; be day hop)
+    /// la hop roi (glove_diag 03/10 18:06: 4 lan tha khi khe 4.5-5.6 cm, hop 4 cm + ngon = 5.6 cm).</summary>
     private float ObjectWidthBetweenFingers(int h)
     {
+        int f0 = _heldFace[0], f1 = _heldFace[1];
+        if (f0 >= 0 && f1 >= 0 && f0 / 2 == f1 / 2 && f0 != f1 && _collider is BoxCollider box)
+        {
+            int axis = f0 / 2;
+            return box.size[axis] * Mathf.Abs(box.transform.lossyScale[axis]) + 2f * _fingerRadius;
+        }
         Vector3 a = Tracked(_hands[h].thumbTip), b = Tracked(_hands[h].indexTip);
         Vector3 pa = ClosestSurfacePoint(a, out _), pb = ClosestSurfacePoint(b, out _);
         return Vector3.Distance(pa, pb) + 2f * _fingerRadius;
