@@ -839,6 +839,9 @@ MonoBehaviour:
   _bulge: 0.35
   _stiffness: 300
   _damping: 18
+  _symmetricPinch: 1
+  _pinchAxisSeconds: 0.3
+  _pinchDepthSeconds: 0.08
   _grabMargin: 0.015
   _releaseMargin: 0.01
   _releaseRule: 0
@@ -1541,6 +1544,9 @@ MonoBehaviour:
   _bulge: 0.35
   _stiffness: 300
   _damping: 18
+  _symmetricPinch: 1
+  _pinchAxisSeconds: 0.3
+  _pinchDepthSeconds: 0.08
   _grabMargin: 0.015
   _releaseMargin: 0.01
   _releaseRule: 0
@@ -1807,6 +1813,9 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
       insertIndex: -1
       addedObject: {fileID: 807227424}
+    - targetCorrespondingSourceObject: {fileID: 1678554349857304352, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 807227425}
   m_SourcePrefab: {fileID: 100100000, guid: 34a22dd67c1e5344591237fdd61e78ec, type: 3}
 --- !u!4 &595217002 stripped
 Transform:
@@ -2400,11 +2409,25 @@ MonoBehaviour:
   _dataThumbTip: {fileID: 0}
   _dataIndexTip: {fileID: 0}
   _fingerRadius: 0.008
+  _tipExtension: 0.004
   _samplesPerBone: 6
   _wholeFingerPasses: 10
   _straightenOnContact: 0.6
   _maxRootCorrectionDeg: 70
   _releaseBlendSeconds: 0.1
+  _contactHoldSeconds: 0.12
+  _contactSmoothSeconds: 0.05
+  _parallelPinch: 0.85
+  _parallelBlendSeconds: 0.15
+  _parallelMaxDeg: 35
+  _comfortReach: 0.88
+  _maxPinchShift: 0.02
+  _pinchShiftSeconds: 0.15
+  _pipAboveDip: 0.003
+  _pipFlexRange: {x: 15, y: 95}
+  _dipFlexRange: {x: 0, y: 60}
+  _pinchSmoothSeconds: 0.08
+  _padAlongDistal: 0.65
 --- !u!114 &807227420
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2512,6 +2535,13 @@ MonoBehaviour:
   _extrapolate: 1
   _extrapolateRotation: 0.5
   _maxExtrapolateSeconds: 0.06
+  _errGood: 0.07
+  _errBad: 0.2
+  _jumpDegrees: 15
+  _confirmDegrees: 10
+  _confLow: 0.25
+  _confHigh: 0.6
+  _minTrust: 0.03
   _switchSeconds: 0.3
   _holdSeconds: 1
   _blendSeconds: 0.3
@@ -2523,6 +2553,79 @@ MonoBehaviour:
   _useQuestRotation: 0
   _useDorsalTiles: 0
   _useLeftHandScale: 1
+--- !u!114 &807227425
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 807227412}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: da20dd631bb3b204db0276b88cf44954, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GloveForceEsp32Output
+  _haptics: {fileID: 807227420}
+  _solver: {fileID: 807227424}
+  _thumbBoardIp: 10.42.0.166
+  _indexBoardIp: 10.42.0.166
+  _maxSendRateHz: 0
+  _flipThumb: 0
+  _flipIndex: 0
+  _mirrorThumbU: 0
+  _mirrorIndexU: 0
+  _thumbDorsal: 1
+  _indexDorsal: 1
+  _thumbDorsalJoint: 1
+  _indexDorsalJoint: 0
+  _forceGain: 1
+  _padForceGain: 0.4
+  _maxForceNewton: 6
+  _maxDorsalTorqueNm: 0.5
+  _dorsalGain: 0.073
+  _gateOnTracking: 1
+  _useFitQuality: 0
+  _fitQualityRamp: {x: 0.2, y: 0.6}
+  _gateFadeSeconds: 0.15
+  _logCsv: 0
+  _sendingTo: 
+  _packetsSent: 0
+  _trust: 1
+  _gate: 1
+  _out:
+  - touching: 0
+    forceN: 0
+    pressN: 0
+    tiltN: {x: 0, y: 0}
+    tiltDeg: 0
+    facing: 0
+    dorsalTorqueNm: 0
+    chamberN: {x: 0, y: 0, z: 0}
+  - touching: 0
+    forceN: 0
+    pressN: 0
+    tiltN: {x: 0, y: 0}
+    tiltDeg: 0
+    facing: 0
+    dorsalTorqueNm: 0
+    chamberN: {x: 0, y: 0, z: 0}
+  _boards:
+  - ip: 
+    online: 0
+    rttMs: 0
+    faults: 0
+    faultText: 
+    renderingPressN: 0
+    targetKPa: {x: 0, y: 0, z: 0, w: 0}
+    measuredKPa: {x: 0, y: 0, z: 0, w: 0}
+  - ip: 
+    online: 0
+    rttMs: 0
+    faults: 0
+    faultText: 
+    renderingPressN: 0
+    targetKPa: {x: 0, y: 0, z: 0, w: 0}
+    measuredKPa: {x: 0, y: 0, z: 0, w: 0}
 --- !u!1 &832575517
 GameObject:
   m_ObjectHideFlags: 0
@@ -3055,11 +3158,25 @@ MonoBehaviour:
   _dataThumbTip: {fileID: 1977105788}
   _dataIndexTip: {fileID: 512854270}
   _fingerRadius: 0.008
+  _tipExtension: 0.004
   _samplesPerBone: 6
   _wholeFingerPasses: 10
   _straightenOnContact: 0.6
   _maxRootCorrectionDeg: 70
   _releaseBlendSeconds: 0.1
+  _contactHoldSeconds: 0.12
+  _contactSmoothSeconds: 0.05
+  _parallelPinch: 0.85
+  _parallelBlendSeconds: 0.15
+  _parallelMaxDeg: 35
+  _comfortReach: 0.88
+  _maxPinchShift: 0.02
+  _pinchShiftSeconds: 0.15
+  _pipAboveDip: 0.003
+  _pipFlexRange: {x: 15, y: 95}
+  _dipFlexRange: {x: 0, y: 60}
+  _pinchSmoothSeconds: 0.08
+  _padAlongDistal: 0.65
 --- !u!4 &929318446 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 6147449420076126336, guid: 0a7d2469f24041c4284c66706f84c45e, type: 3}
@@ -4239,6 +4356,9 @@ MonoBehaviour:
   _bulge: 0.35
   _stiffness: 300
   _damping: 18
+  _symmetricPinch: 1
+  _pinchAxisSeconds: 0.3
+  _pinchDepthSeconds: 0.08
   _grabMargin: 0.015
   _releaseMargin: 0.01
   _releaseRule: 0
@@ -4698,6 +4818,9 @@ MonoBehaviour:
   _bulge: 0.35
   _stiffness: 300
   _damping: 18
+  _symmetricPinch: 1
+  _pinchAxisSeconds: 0.3
+  _pinchDepthSeconds: 0.08
   _grabMargin: 0.015
   _releaseMargin: 0.01
   _releaseRule: 0

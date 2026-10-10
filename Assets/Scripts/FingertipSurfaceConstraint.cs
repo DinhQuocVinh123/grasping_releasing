@@ -127,6 +127,26 @@ public class FingertipSurfaceConstraint : MonoBehaviour
         if (tip == null) return Vector3.zero;
         return s_trackedTip.TryGetValue(tip, out Vector3 p) ? p : tip.position;
     }
+
+    // Full REAL pose (position + rotation) of every thumb/index chain bone, captured on the same line as
+    // s_trackedTip, i.e. before this script bends the finger onto the surface. GloveForceEsp32Output needs
+    // the real orientation of the fingertip (pad normal) and the real joint positions (dorsal torque).
+    private struct TrackedBone { public Pose Pose; public FingertipSurfaceConstraint Owner; }
+    private static readonly System.Collections.Generic.Dictionary<Transform, TrackedBone> s_trackedPose =
+        new System.Collections.Generic.Dictionary<Transform, TrackedBone>();
+    private int _poseFrame = -100; // last frame THIS hand's pass ran (disabled / no objects = stops)
+
+    /// <summary>Real (unconstrained) world pose of a thumb/index chain bone (Metacarpal/Proximal ... Tip)
+    /// from the most recent pass. Bones this script never touched, or whose hand's constraint is no
+    /// longer running (disabled, no objects in the scene), return the bone's current pose.</summary>
+    public static Pose TrackedPose(Transform bone)
+    {
+        if (bone == null) return Pose.identity;
+        if (s_trackedPose.TryGetValue(bone, out TrackedBone e) && e.Owner != null && e.Owner.isActiveAndEnabled &&
+            Time.frameCount - e.Owner._poseFrame <= 2)
+            return e.Pose;
+        return new Pose(bone.position, bone.rotation);
+    }
     private readonly Quaternion[] _scratch = new Quaternion[Bones];
 
     /// <summary>Tong thoi gian (ms) moi FingertipSurfaceConstraint chay trong KHUNG TRUOC -- ghi vao glove_diag.</summary>
@@ -150,6 +170,7 @@ public class FingertipSurfaceConstraint : MonoBehaviour
             _objects != null && _objects.Length > 0 ? _objects : SquishyPinchable.Active;
         if (objects.Count == 0 && PhysicsPinchGrabbable.Active.Count == 0) return;
         EnsureChains();
+        _poseFrame = Time.frameCount;
         if (_state == null || _state.Length != _chains.Length)
         {
             _state = new FingerState[_chains.Length];
@@ -173,6 +194,9 @@ public class FingertipSurfaceConstraint : MonoBehaviour
 
             Transform tip = chain[Bones];
             if (f < 2) s_trackedTip[tip] = tip.position; // dang ngon luc nay = tay that vua ghi
+            if (f < 2)
+                for (int j = 0; j <= Bones; j++)
+                    s_trackedPose[chain[j]] = new TrackedBone { Pose = new Pose(chain[j].position, chain[j].rotation), Owner = this };
             // Ngon cai / tro cua tay DANG CAM: luon dat tren be mat (xuyen vao hay ho ra deu sua).
             Transform dataTip = f == 0 ? (_dataThumbTip != null ? _dataThumbTip : tip)
                               : f == 1 ? (_dataIndexTip != null ? _dataIndexTip : tip) : null;
