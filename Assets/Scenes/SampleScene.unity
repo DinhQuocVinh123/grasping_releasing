@@ -1898,6 +1898,7 @@ GameObject:
   - component: {fileID: 670765460}
   - component: {fileID: 670765459}
   - component: {fileID: 670765458}
+  - component: {fileID: 670765464}
   m_Layer: 8
   m_Name: PhysicsCube
   m_TagString: Untagged
@@ -2058,6 +2059,39 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &670765464
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 670765457}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 98806bcd7414b4047aa67a6a59810d22, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::HapticMaterial
+  _pressureAtMaxIndent: 0
+  _extraDepthToFullPressure: 0.008
+  _maxForceNewton: 4
+  _touch:
+    amplitude: 0.8
+    frequencyHz: 120
+    durationSeconds: 0.025
+  _speedForFullTouch: 0.3
+  _minTouchScale: 0.3
+  _untouch:
+    amplitude: 0.2
+    frequencyHz: 80
+    durationSeconds: 0.02
+  _grab:
+    amplitude: 0.5
+    frequencyHz: 100
+    durationSeconds: 0.04
+  _release:
+    amplitude: 0.3
+    frequencyHz: 80
+    durationSeconds: 0.03
 --- !u!1 &717762663
 GameObject:
   m_ObjectHideFlags: 0
@@ -2444,10 +2478,12 @@ MonoBehaviour:
   _indexTip: {fileID: 595217003}
   _objects:
   - {fileID: 258154970}
+  _cubes: []
   _outputs:
   - {fileID: 807227421}
   - {fileID: 807227422}
   _untouchHysteresis: 0.002
+  _equalPinchForces: 1
   _state:
   - touching: 0
     depthMeters: 0
@@ -2578,6 +2614,7 @@ MonoBehaviour:
   _indexDorsal: 1
   _thumbDorsalJoint: 1
   _indexDorsalJoint: 0
+  _dorsalIgnoresSign: 1
   _forceGain: 1
   _padForceGain: 0.4
   _maxForceNewton: 6
@@ -2588,6 +2625,7 @@ MonoBehaviour:
   _fitQualityRamp: {x: 0.2, y: 0.6}
   _gateFadeSeconds: 0.15
   _logCsv: 0
+  _logcatHz: 5
   _sendingTo: 
   _packetsSent: 0
   _trust: 1
@@ -4064,11 +4102,13 @@ MonoBehaviour:
   - {fileID: 1337383835}
   - {fileID: 565819989}
   - {fileID: 258154970}
+  _cubes: []
   _outputs:
   - {fileID: 1200314405}
   - {fileID: 1200314406}
   - {fileID: 1200314407}
   _untouchHysteresis: 0.002
+  _equalPinchForces: 1
   _state:
   - touching: 0
     depthMeters: 0

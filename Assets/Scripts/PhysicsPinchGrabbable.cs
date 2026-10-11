@@ -429,6 +429,40 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return Physics.ClosestPoint(world, _collider, transform.position, transform.rotation);
     }
 
+    // --- Cho HapticRenderer: luc len dau ngon khi cham / kep ---
+
+    /// <summary>Da dau ngon lot vao trong vat bao sau (met, + = trong vat, am = con cach be mat).</summary>
+    public bool TryGetSkinDepth(Transform tip, out float depthMeters)
+    {
+        depthMeters = float.NegativeInfinity;
+        if (_collider == null || tip == null) return false;
+        depthMeters = -SkinDistance(tip.position);
+        return true;
+    }
+
+    /// <summary>Huong vat day dau ngon ra (the gioi): phap tuyen mat hop gan dau ngon nhat.</summary>
+    public Vector3 ContactNormal(Transform tip)
+    {
+        if (tip == null || _collider == null) return Vector3.up;
+        int face = FaceOf(tip.position);
+        if (face >= 0) return FaceNormal(face);
+        Vector3 d = tip.position - _collider.bounds.center;
+        return d.sqrMagnitude > 1e-12f ? d.normalized : Vector3.up;
+    }
+
+    /// <summary>Dang kep giua DUNG 2 dau ngon nay: do lun CHUNG cua moi ngon = nua do bop (be day vat giua 2 ngon,
+    /// da cong 2 lan ban kinh ngon, tru khe 2 dau ngon). Ngon that bop sau vao trong hop van ra so on dinh va
+    /// khong phu thuoc hop dang lech ve ngon nao -- khac SkinDistance, nhay sang mat ben canh khi ngon lot qua tam.</summary>
+    public bool TryGetPinchDepth(Transform thumbTip, Transform indexTip, out float depthMeters)
+    {
+        depthMeters = 0f;
+        if (_heldBy < 0 || thumbTip == null || indexTip == null) return false;
+        if (_hands[_heldBy].thumbTip != thumbTip || _hands[_heldBy].indexTip != indexTip) return false;
+        float gap = Vector3.Distance(thumbTip.position, indexTip.position);
+        depthMeters = 0.5f * (ObjectWidthBetweenFingers(_heldBy) - gap);
+        return true;
+    }
+
     // --- Cho FingertipSurfaceConstraint: ngon ao khong xuyen vat, dang cam thi nam tren be mat ---
 
     /// <summary>Da ngon lot vao trong vat -> diem (tam dau ngon) de da ngon vua cham be mat.</summary>

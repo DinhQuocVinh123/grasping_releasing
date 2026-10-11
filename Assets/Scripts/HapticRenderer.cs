@@ -27,6 +27,9 @@ public class HapticRenderer : MonoBehaviour
     [Header("Vật cảm nhận được")]
     [Tooltip("De trong = moi vat bop duoc trong scene.")]
     [SerializeField] private SquishyPinchable[] _objects;
+    [Tooltip("Khoi cung (khong lun). De trong = moi PhysicsPinchGrabbable trong scene. Do cung lay tu HapticMaterial tren khoi: " +
+             "Pressure At Max Indent = 0, Extra Depth To Full Pressure = so met ngon that lan vao thi luc dat toi da.")]
+    [SerializeField] private PhysicsPinchGrabbable[] _cubes;
 
     [Header("Thiết bị đầu ra (mọi component có IHapticGlove)")]
     [SerializeField] private MonoBehaviour[] _outputs;
@@ -64,6 +67,7 @@ public class HapticRenderer : MonoBehaviour
     public FingerState GetState(HapticFinger finger) => _state[(int)finger];
 
     private readonly float[] _previousDepth = new float[2];
+    private readonly Component[] _touchedTarget = new Component[2]; // bong hoac khoi dang cham -- vat lieu cho xung Untouch
     private IHapticGlove[] _gloves;
     private SquishyPinchable[] _heldLastFrame = Array.Empty<SquishyPinchable>();
 
@@ -84,16 +88,19 @@ public class HapticRenderer : MonoBehaviour
         UpdateGrabEvents(objects);
     }
 
-    /// <summary>Do lun cua 1 dau ngon vao vat SAU NHAT ma no an vao.</summary>
+    /// <summary>Do lun cua 1 dau ngon vao vat SAU NHAT ma no an vao (bong HOAC khoi).</summary>
     private struct Contact
     {
         public bool valid;              // dau ngon dang co (dang theo doi duoc)
         public float depth;             // met, + = trong vat
-        public SquishyPinchable obj;
+        public SquishyPinchable obj;    // bong
+        public PhysicsPinchGrabbable cube; // khoi cung
         public Vector3 normal;          // huong vat day ngon ra; zero = hoi vat (ContactNormal)
+
+        public Component Target => obj != null ? obj : cube;
     }
 
-    private static Contact Measure(Transform tip, System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects)
+    private Contact Measure(Transform tip, System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects)
     {
         var c = new Contact { valid = tip != null && tip.gameObject.activeInHierarchy, depth = float.NegativeInfinity };
         if (!c.valid) return c;
@@ -104,6 +111,16 @@ public class HapticRenderer : MonoBehaviour
             {
                 c.depth = d;
                 c.obj = obj;
+            }
+        }
+        foreach (var cube in CurrentCubes())
+        {
+            if (cube == null || !cube.isActiveAndEnabled) continue;
+            if (cube.TryGetSkinDepth(tip, out float d) && d > c.depth)
+            {
+                c.depth = d;
+                c.obj = null;
+                c.cube = cube;
             }
         }
         return c;
@@ -119,16 +136,29 @@ public class HapticRenderer : MonoBehaviour
         {
             if (obj == null || !obj.isActiveAndEnabled || !obj.IsHeldBy(_thumbTip)) continue;
             if (!obj.TryGetSkinDepth(_thumbTip, out float dThumb) || !obj.TryGetSkinDepth(_indexTip, out float dIndex)) return;
-            Vector3 axis = _thumbTip.position - _indexTip.position; // ngon tro -> ngon cai
-            if (axis.sqrMagnitude < 1e-10f) return;
-            axis.Normalize();
-
-            thumb.depth = index.depth = 0.5f * (dThumb + dIndex);
-            thumb.obj = index.obj = obj;
-            thumb.normal = axis;
-            index.normal = -axis;
+            SetPinch(ref thumb, ref index, 0.5f * (dThumb + dIndex), obj, null);
             return;
         }
+        foreach (var cube in CurrentCubes())
+        {
+            if (cube == null || !cube.isActiveAndEnabled) continue;
+            if (!cube.TryGetPinchDepth(_thumbTip, _indexTip, out float shared)) continue;
+            SetPinch(ref thumb, ref index, shared, null, cube);
+            return;
+        }
+    }
+
+    private void SetPinch(ref Contact thumb, ref Contact index, float depth, SquishyPinchable obj, PhysicsPinchGrabbable cube)
+    {
+        Vector3 axis = _thumbTip.position - _indexTip.position; // ngon tro -> ngon cai
+        if (axis.sqrMagnitude < 1e-10f) return;
+        axis.Normalize();
+
+        thumb.depth = index.depth = depth;
+        thumb.obj = index.obj = obj;
+        thumb.cube = index.cube = cube;
+        thumb.normal = axis;
+        index.normal = -axis;
     }
 
     private void UpdateFinger(HapticFinger finger, Transform tip, Contact contact, float dt)
@@ -137,6 +167,7 @@ public class HapticRenderer : MonoBehaviour
         FingerState state = _state[f];
         float depth = contact.depth;
         SquishyPinchable deepest = contact.obj;
+        Component target = contact.Target;
         bool tipValid = contact.valid;
 
         bool touching = state.touching
@@ -149,23 +180,28 @@ public class HapticRenderer : MonoBehaviour
             float approachSpeed = float.IsInfinity(_previousDepth[f])
                 ? 0f
                 : Mathf.Max(0f, (depth - _previousDepth[f]) / dt);
-            Emit(finger, HapticEventType.Touch, MaterialOf(deepest).TransientFor(HapticEventType.Touch, approachSpeed), deepest);
+            Emit(finger, HapticEventType.Touch, MaterialOf(target).TransientFor(HapticEventType.Touch, approachSpeed), deepest);
         }
         else if (!touching && state.touching)
         {
-            Emit(finger, HapticEventType.Untouch, MaterialOf(state.touchedObject).TransientFor(HapticEventType.Untouch, 0f), state.touchedObject);
+            Emit(finger, HapticEventType.Untouch, MaterialOf(_touchedTarget[f]).TransientFor(HapticEventType.Untouch, 0f), state.touchedObject);
         }
 
         state.touching = touching;
         state.depthMeters = tipValid ? depth : 0f;
         state.touchedObject = touching ? deepest : null;
-        state.pressure01 = touching && deepest != null
-            ? MaterialOf(deepest).PressureFromDepth(depth, deepest.MaxIndentMeters)
+        _touchedTarget[f] = touching ? target : null;
+        // Khoi cung: do lun toi da = 0 -> luc tang tu 0 len toi da trong Extra Depth To Full Pressure cua vat lieu.
+        float maxIndent = deepest != null ? deepest.MaxIndentMeters : 0f;
+        state.pressure01 = touching && target != null
+            ? MaterialOf(target).PressureFromDepth(depth, maxIndent)
             : 0f;
         // Vector luc (god-object): vat day ngon RA NGOAI theo phap tuyen, do lon ti le muc luc.
-        Vector3 normal = contact.normal != Vector3.zero || deepest == null ? contact.normal : deepest.ContactNormal(tip);
-        state.forceNewton = touching && deepest != null
-            ? normal * (state.pressure01 * MaterialOf(deepest).MaxForceNewton)
+        Vector3 normal = contact.normal;
+        if (normal == Vector3.zero && deepest != null) normal = deepest.ContactNormal(tip);
+        else if (normal == Vector3.zero && contact.cube != null) normal = contact.cube.ContactNormal(tip);
+        state.forceNewton = touching && target != null
+            ? normal * (state.pressure01 * MaterialOf(target).MaxForceNewton)
             : Vector3.zero;
         _state[f] = state;
         _previousDepth[f] = tipValid ? depth : float.NegativeInfinity;
@@ -216,7 +252,10 @@ public class HapticRenderer : MonoBehaviour
     private System.Collections.Generic.IReadOnlyList<SquishyPinchable> CurrentObjects() =>
         _objects != null && _objects.Length > 0 ? _objects : SquishyPinchable.Active;
 
-    private static HapticMaterial MaterialOf(SquishyPinchable obj)
+    private System.Collections.Generic.IReadOnlyList<PhysicsPinchGrabbable> CurrentCubes() =>
+        _cubes != null && _cubes.Length > 0 ? _cubes : PhysicsPinchGrabbable.Active;
+
+    private static HapticMaterial MaterialOf(Component obj)
     {
         if (obj != null && obj.TryGetComponent(out HapticMaterial material)) return material;
         return HapticMaterial.Default;
