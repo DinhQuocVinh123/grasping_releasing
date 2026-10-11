@@ -67,6 +67,11 @@ public class GloveForceEsp32Output : MonoBehaviour
     [Range(0, 2)] [SerializeField] private int _thumbDorsalJoint = 1;
     [Tooltip("Index chain: 0 Proximal (MCP), 1 Intermediate (PIP), 2 Distal (DIP).")]
     [Range(0, 2)] [SerializeField] private int _indexDorsalJoint = 0;
+    [Tooltip("Render the torque's size whatever its sign. The contact normal is approximated as ball centre -> fingertip, " +
+             "which flips when the tracked fingertip sinks near the centre or sits beside the ball; a real pinch then reads " +
+             "as a force that FLEXES the finger and the actuator gets nothing (seen on the index: face -0.9, T 0). " +
+             "The dorsal actuator can only resist closing anyway. Off = only the extending part of the torque, as before.")]
+    [SerializeField] private bool _dorsalIgnoresSign = true;
 
     [Header("Scaling and limits")]
     [Tooltip("Multiplies the virtual force before anything else. 1 = the newtons HapticRenderer computes.")]
@@ -413,7 +418,9 @@ public class GloveForceEsp32Output : MonoBehaviour
             Pose joint = FingertipSurfaceConstraint.TrackedPose(chain[j]);
             Vector3 rigAxis = joint.rotation * (thumb ? Vector3.up : Vector3.right);
             Vector3 flexAxis = (thumb ? _flipThumb : _flipIndex) ? -rigAxis : rigAxis;
-            float tau = GloveEsp32Protocol.ExtensionTorque(joint.position, flexAxis, tip.position, F);
+            float tau = _dorsalIgnoresSign
+                ? Mathf.Abs(Vector3.Dot(flexAxis, Vector3.Cross(tip.position - joint.position, F)))
+                : GloveEsp32Protocol.ExtensionTorque(joint.position, flexAxis, tip.position, F);
             o.dorsalTorqueNm = Mathf.Min(tau * _dorsalGain, _maxDorsalTorqueNm);
         }
 
