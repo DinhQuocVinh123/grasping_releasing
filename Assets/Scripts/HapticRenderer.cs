@@ -35,6 +35,13 @@ public class HapticRenderer : MonoBehaviour
     [Tooltip("Da ngon phai roi xa be mat hon khoang nay (met) moi tinh la 'roi'. Tranh cham/roi lien tuc khi ngon run o ngay mep.")]
     [SerializeField] private float _untouchHysteresis = 0.002f;
 
+    [Header("Kẹp hai ngón")]
+    [Tooltip("Vat dang bi CAM giua ngon cai va ngon tro: hai ngon nhan CUNG muc luc, nguoc chieu nhau theo duong noi hai dau ngon " +
+             "-- vat dung yen giua hai ngon thi luc hai ben phai bang nhau. Do lun chung = trung binh do lun hai ngon = nua do bop, " +
+             "khong phu thuoc vat dang lech ve ngon nao (tracking dat ngon tro hut vai mm thi ngon tro van cham cung luc ngon cai). " +
+             "Tat = moi ngon tinh rieng theo do lun cua no, huong tu tam vat ra dau ngon.")]
+    [SerializeField] private bool _equalPinchForces = true;
+
     /// <summary>Trang thai hien tai cua 1 ngon -- de hien thi / ghi log.</summary>
     [Serializable]
     public struct FingerState
@@ -69,32 +76,68 @@ public class HapticRenderer : MonoBehaviour
         CacheOutputs();
 
         var objects = CurrentObjects();
-        UpdateFinger(HapticFinger.Thumb, _thumbTip, objects, dt);
-        UpdateFinger(HapticFinger.Index, _indexTip, objects, dt);
+        Contact thumb = Measure(_thumbTip, objects);
+        Contact index = Measure(_indexTip, objects);
+        if (_equalPinchForces) SharePinch(objects, ref thumb, ref index);
+        UpdateFinger(HapticFinger.Thumb, _thumbTip, thumb, dt);
+        UpdateFinger(HapticFinger.Index, _indexTip, index, dt);
         UpdateGrabEvents(objects);
     }
 
-    private void UpdateFinger(HapticFinger finger, Transform tip, System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects, float dt)
+    /// <summary>Do lun cua 1 dau ngon vao vat SAU NHAT ma no an vao.</summary>
+    private struct Contact
+    {
+        public bool valid;              // dau ngon dang co (dang theo doi duoc)
+        public float depth;             // met, + = trong vat
+        public SquishyPinchable obj;
+        public Vector3 normal;          // huong vat day ngon ra; zero = hoi vat (ContactNormal)
+    }
+
+    private static Contact Measure(Transform tip, System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects)
+    {
+        var c = new Contact { valid = tip != null && tip.gameObject.activeInHierarchy, depth = float.NegativeInfinity };
+        if (!c.valid) return c;
+        foreach (var obj in objects)
+        {
+            if (obj == null || !obj.isActiveAndEnabled) continue;
+            if (obj.TryGetSkinDepth(tip, out float d) && d > c.depth)
+            {
+                c.depth = d;
+                c.obj = obj;
+            }
+        }
+        return c;
+    }
+
+    /// <summary>Vat dang bi cam giua 2 ngon: ca 2 ngon lay do lun TRUNG BINH (= nua do bop: tong do lun = 2*ban kinh -
+    /// khoang cach 2 dau ngon khi 2 ngon o 2 phia doi dien), luc huong theo duong noi 2 dau ngon, day moi ngon ra xa ngon kia.
+    /// Huong tu tam vat ra dau ngon (ContactNormal) lat chieu khi dau ngon lun gan toi tam -- duong noi 2 ngon thi khong.</summary>
+    private void SharePinch(System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects, ref Contact thumb, ref Contact index)
+    {
+        if (!thumb.valid || !index.valid) return;
+        foreach (var obj in objects)
+        {
+            if (obj == null || !obj.isActiveAndEnabled || !obj.IsHeldBy(_thumbTip)) continue;
+            if (!obj.TryGetSkinDepth(_thumbTip, out float dThumb) || !obj.TryGetSkinDepth(_indexTip, out float dIndex)) return;
+            Vector3 axis = _thumbTip.position - _indexTip.position; // ngon tro -> ngon cai
+            if (axis.sqrMagnitude < 1e-10f) return;
+            axis.Normalize();
+
+            thumb.depth = index.depth = 0.5f * (dThumb + dIndex);
+            thumb.obj = index.obj = obj;
+            thumb.normal = axis;
+            index.normal = -axis;
+            return;
+        }
+    }
+
+    private void UpdateFinger(HapticFinger finger, Transform tip, Contact contact, float dt)
     {
         int f = (int)finger;
         FingerState state = _state[f];
-
-        // Tim vat ma da ngon an vao SAU NHAT
-        float depth = float.NegativeInfinity;
-        SquishyPinchable deepest = null;
-        bool tipValid = tip != null && tip.gameObject.activeInHierarchy;
-        if (tipValid)
-        {
-            foreach (var obj in objects)
-            {
-                if (obj == null || !obj.isActiveAndEnabled) continue;
-                if (obj.TryGetSkinDepth(tip, out float d) && d > depth)
-                {
-                    depth = d;
-                    deepest = obj;
-                }
-            }
-        }
+        float depth = contact.depth;
+        SquishyPinchable deepest = contact.obj;
+        bool tipValid = contact.valid;
 
         bool touching = state.touching
             ? depth > -_untouchHysteresis
@@ -120,8 +163,9 @@ public class HapticRenderer : MonoBehaviour
             ? MaterialOf(deepest).PressureFromDepth(depth, deepest.MaxIndentMeters)
             : 0f;
         // Vector luc (god-object): vat day ngon RA NGOAI theo phap tuyen, do lon ti le muc luc.
+        Vector3 normal = contact.normal != Vector3.zero || deepest == null ? contact.normal : deepest.ContactNormal(tip);
         state.forceNewton = touching && deepest != null
-            ? deepest.ContactNormal(tip) * (state.pressure01 * MaterialOf(deepest).MaxForceNewton)
+            ? normal * (state.pressure01 * MaterialOf(deepest).MaxForceNewton)
             : Vector3.zero;
         _state[f] = state;
         _previousDepth[f] = tipValid ? depth : float.NegativeInfinity;
