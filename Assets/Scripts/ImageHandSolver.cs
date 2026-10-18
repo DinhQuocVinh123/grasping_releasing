@@ -47,6 +47,10 @@ public sealed class ImageHandSolver : MonoBehaviour
     [SerializeField] private float _confHigh = 0.6f;
     [Tooltip("Muc tin toi thieu moi ket qua (de khong dung han khi model mai khong chac).")]
     [SerializeField] private float _minTrust = 0.03f;
+    [Tooltip("Ket qua tin duoi muc nay KHONG tinh la 'thay tay' (tay o mep khung / bi khuat -> model doan sai, glove_diag 13/10: " +
+             "fit 0.03 lien tuc ma w van 1). Chi toan ket qua kem -> giu dang tot cuoi _holdSeconds roi tra ve tay Quest, gate " +
+             "cua GloveForceEsp32Output ve 0. Sau khi mat tay, ket qua DAU TIEN phai dat muc nay moi duoc lay. 0 = nhu cu.")]
+    [SerializeField] private float _minGoodTrust = 0.1f;
     [Tooltip("Khi bo giai doi sang cach hieu khac (vd thoat khoi dang ngon gap sai), truot sang dang moi trong khoang nay (giay).")]
     [SerializeField] private float _switchSeconds = 0.3f;
     [Tooltip("Python mat tay: giu tu the cuoi bay lau (giay) roi moi tra ve tay Quest.")]
@@ -89,7 +93,7 @@ public sealed class ImageHandSolver : MonoBehaviour
     private readonly float[] _w = new float[HandImageFit.Points];
 
     private int _lastFid;
-    private float _lastSolveTime = -999f;
+    private float _lastGoodTime = -999f;     // lan cuoi co ket qua dat _minGoodTrust
     private float _depthPrior;
     private bool _hasDepthPrior;
     private float _lastDepthTime;
@@ -179,7 +183,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         if (Time.frameCount != _dispFrame)
         {
             _dispFrame = Time.frameCount;
-            bool fresh = _fit.HasSolution && (Time.time - _lastSolveTime <= _holdSeconds || holdLonger);
+            bool fresh = _fit.HasSolution && (Time.time - _lastGoodTime <= _holdSeconds || holdLonger);
             _weight = Mathf.MoveTowards(_weight, fresh ? 1f : 0f, Time.deltaTime / Mathf.Max(_blendSeconds, 1e-3f));
             if (_fit.HasSolution)
             {
@@ -311,17 +315,31 @@ public sealed class ImageHandSolver : MonoBehaviour
             else dorsal = -1;
         }
 
-        bool warm = Time.time - _lastSolveTime <= _warmSeconds;
+        // Giai tiep tu dap an truoc chi khi dap an do con TOT (ket qua kem lam diem xuat phat de bi ket o dang sai)
+        bool warm = Time.time - _lastGoodTime <= _warmSeconds;
         var sw = System.Diagnostics.Stopwatch.StartNew();
         bool ok = _fit.Solve(cam.position, cam.rotation, _dirs, _w,
                              _hasDepthPrior ? _depthPrior : 0f, _useQuestRotation && _hasRotPrior ? _rotPrior : (Quaternion?)null,
                              warm, dorsal, dorsalDir);
         SolveMs = (float)sw.Elapsed.TotalMilliseconds;
         if (!ok) return;
-        if (!_hasFilter || Time.time - _lastSolveTime > _holdSeconds) ResetFilter(Time.time, _hasFilter);
+        if (!_hasFilter || Time.time - _lastGoodTime > _holdSeconds)
+        {
+            // Bat dau lai (lan dau / sau khi mat tay): chi lay ket qua TOT, khong thi tay giu nguyen dang dang hien
+            LastTrust = ResultTrust();
+            if (LastTrust < _minGoodTrust) return;
+            ResetFilter(Time.time, _hasFilter);
+        }
         else FilterStep(Time.time);
-        _lastSolveTime = Time.time;
+        if (LastTrust >= _minGoodTrust) _lastGoodTime = Time.time;
         SolvedFrameId = fid;
+    }
+
+    /// <summary>Do tin ket qua vua giai theo sai so anh + do tin cay diem (nhu FilterStep, khong co phan chong nhay huong).</summary>
+    private float ResultTrust()
+    {
+        float w = Mathf.Clamp01((_errBad - _fit.ImageError) / Mathf.Max(_errBad - _errGood, 1e-4f));
+        return Mathf.Max(w * Mathf.Max(ConfTrust(0, 8), 0.3f), _minTrust);
     }
 
     /// <summary>Bat dau lai bo loc tu ket qua giai hien tai (lan dau, hoac sau khi mat tay lau).</summary>

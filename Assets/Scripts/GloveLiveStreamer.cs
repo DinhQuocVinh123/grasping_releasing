@@ -129,6 +129,10 @@ public class GloveLiveStreamer : MonoBehaviour
     private readonly Vector3[] _hintCenters = new Vector3[PoseHistory];
     private readonly float[] _hintPalms = new float[PoseHistory];
     private readonly bool[] _hintOk = new bool[PoseHistory];
+    // Goi y moi nhat theo TI LE ANH (goc tren-trai) -- CameraFrameCue dung de biet tay sap ra khoi khung.
+    private Vector2 _latestHintUV;
+    private Vector2 _latestHintPalmUV;
+    private float _latestHintTime = -999f;
 
     /// <summary>Huong camera luc chup anh so frameId (neu con trong bo nho gan day).</summary>
     public bool TryGetFramePose(int frameId, out Pose pose)
@@ -156,6 +160,29 @@ public class GloveLiveStreamer : MonoBehaviour
             return false;
         // Viewport cua Meta: goc DUOI-trai (0,0) -> lat truc y (giong BuildHeader)
         ray = _passthroughCamera.ViewportPointToRay(new Vector2(uv.x, 1f - uv.y), cam);
+        return true;
+    }
+
+    /// <summary>Tam tay THEO QUEST tren anh moi nhat: uv = ti le anh tu goc TREN-trai (&lt;0 hoac &gt;1 = ngoai khung),
+    /// palmUV = chieu dai long ban tay theo ti le chieu rong (x) / chieu cao (y) anh, age = goi y cu bao nhieu giay.
+    /// false = chua lan nao Quest thay tay.</summary>
+    public bool TryGetLatestHandHint(out Vector2 uv, out Vector2 palmUV, out float age)
+    {
+        uv = _latestHintUV;
+        palmUV = _latestHintPalmUV;
+        age = Time.time - _latestHintTime;
+        return _latestHintTime > 0f;
+    }
+
+    /// <summary>Huong camera luc chup anh moi nhat.</summary>
+    public bool TryGetLatestCameraPose(out Pose pose) => TryGetFramePose(_frameId, out pose);
+
+    /// <summary>Huong tia qua diem uv tren anh (goc TREN-trai), trong toa do CUA CAMERA.</summary>
+    public bool TryGetCameraLocalRay(Vector2 uv, out Vector3 direction)
+    {
+        direction = Vector3.forward;
+        if (_passthroughCamera == null || !_passthroughCamera.IsPlaying) return false;
+        direction = _passthroughCamera.ViewportPointToRay(new Vector2(uv.x, 1f - uv.y), new Pose(Vector3.zero, Quaternion.identity)).direction;
         return true;
     }
 
@@ -188,6 +215,13 @@ public class GloveLiveStreamer : MonoBehaviour
                 hy = (1f - vc.y) * height;
                 size = Mathf.Abs(vs.x - vc.x) * width; // chieu dai long ban tay khong bi nghieng lam ngan
                 valid = hx > -width && hx < 2f * width && hy > -height && hy < 2f * height;
+                if (valid)
+                {
+                    _latestHintUV = new Vector2(vc.x, 1f - vc.y);
+                    float palmU = Mathf.Abs(vs.x - vc.x);
+                    _latestHintPalmUV = new Vector2(palmU, palmU * width / Mathf.Max(height, 1));
+                    _latestHintTime = Time.time;
+                }
                 int hs = frameId % PoseHistory;
                 _hintCenters[hs] = center;
                 _hintPalms[hs] = palm;
