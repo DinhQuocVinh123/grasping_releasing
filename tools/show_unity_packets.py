@@ -4,9 +4,9 @@ Show exactly what Unity (the Quest build) sends to the PC relay, decoded field b
 
     Quest --UDP 5011--> this script (prints it; sends NOTHING to the Arduino)
 
-Each packet is 56 bytes = 14 float32, little-endian (GloveEsp32Protocol.cs). Every
+Each packet is 64 bytes = 16 float32, little-endian (GloveEsp32Protocol.cs, version 3). Every
 --every seconds this prints the newest packet: the 4 raw bytes of each number, its name
-and value, and the text line glove_serial_bridge.py would write to the Arduino for it.
+and value, and the dorsal force and actuator length the relay would feed its force model.
 
 It announces itself on UDP 5012 the same way the relay does, so Unity finds it whether or
 not the board IPs are typed into the inspector. Only one program can receive on 5011:
@@ -20,7 +20,7 @@ import socket
 import struct
 import time
 
-CMD_PORT, TLM_PORT, VERSION, CMD_FLOATS, TLM_FLOATS = 5011, 5012, 2, 14, 16   # GloveEsp32Protocol.cs
+CMD_PORT, TLM_PORT, VERSION, CMD_FLOATS, TLM_FLOATS = 5011, 5012, 3, 16, 16   # GloveEsp32Protocol.cs
 
 FIELDS = [
     ("seq", "so thu tu goi"),
@@ -30,25 +30,22 @@ FIELDS = [
     ("thumb P (N)", "ngon cai: luc an dem ngon"),
     ("thumb U (N)", "ngon cai: nghieng ngang"),
     ("thumb V (N)", "ngon cai: nghieng doc"),
+    ("thumb T (N*m)", "ngon cai: mo-men duoi (mu ngon)"),
+    ("thumb L (mm)", "ngon cai: chieu dai co mu ngon"),
     ("index contact", "ngon tro cham? 0/1"),
     ("index P (N)", "ngon tro: luc an dem ngon"),
     ("index U (N)", "ngon tro: nghieng ngang"),
     ("index V (N)", "ngon tro: nghieng doc"),
-    ("thumb T (N*m)", "ngon cai: mo-men duoi (mu ngon)"),
     ("index T (N*m)", "ngon tro: mo-men duoi (mu ngon)"),
-    ("version", "phai = 2"),
+    ("index L (mm)", "ngon tro: chieu dai co mu ngon"),
+    ("version", "phai = 3"),
 ]
 
 
-def arduino_line(f):
-    """The line glove_serial_bridge.py makes from this packet (same rules as its parse_unity + make_line)."""
-    body = "G,%d" % int(f[0])
-    for base, tq in ((3, 11), (7, 12)):
-        body += ",%.4f,%.4f,%.4f,%.5f" % (max(f[base + 1], 0.0), f[base + 2], f[base + 3], max(f[tq], 0.0))
-    cs = 0
-    for ch in body:
-        cs ^= ord(ch)
-    return "%s*%02X" % (body, cs)
+def relay_view(f, arm_m=0.012):
+    """What the relay feeds its force model: wanted dorsal force (T / arm) and L, per finger."""
+    return "thumb F %.3f N at L %.1f mm | index F %.3f N at L %.1f mm (relay turns these into bar)" % (
+        max(f[7], 0.0) / arm_m, f[8], max(f[13], 0.0) / arm_m, f[14])
 
 
 def main():
@@ -115,11 +112,11 @@ def main():
                 for i, (name, meaning) in enumerate(FIELDS):
                     raw = " ".join("%02X" % b for b in latest[4 * i:4 * i + 4])
                     v = f[i]
-                    val = "%d" % v if i in (0, 3, 7, 13) else "%.4f" % v
+                    val = "%d" % v if i in (0, 3, 9, 15) else "%.4f" % v
                     print("%2d  %s   %-15s %10s   %s" % (i, raw, name, val, meaning))
-                if round(f[13]) != VERSION:
-                    print("!! version %g != %d: the relay would DROP this packet" % (f[13], VERSION))
-                print("-> relay would send to Arduino: " + arduino_line(f))
+                if round(f[15]) != VERSION:
+                    print("!! version %g != %d: the relay would DROP this packet" % (f[15], VERSION))
+                print("-> relay: " + relay_view(f))
     except KeyboardInterrupt:
         pass
     print("\nstopped")

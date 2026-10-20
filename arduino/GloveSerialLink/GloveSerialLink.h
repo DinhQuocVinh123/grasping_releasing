@@ -6,18 +6,21 @@
 //
 // One text line per update, 50 per second, at 115200 baud:
 //
-//   G,<seq>,<thP>,<thU>,<thV>,<thT>,<ixP>,<ixU>,<ixV>,<ixT>*<cs>\n
+//   H,<seq>,<thP>,<thU>,<thV>,<thBar>,<ixP>,<ixU>,<ixV>,<ixBar>*<cs>\n
 //
 //   per finger (th = thumb, ix = index):
-//     P  pressing force on the fingertip pad, N (>= 0)
-//     U  tilt along the pad's u axis, N    (in-plane part of the force;
-//     V  tilt along the pad's v axis, N     angle = atan2(sqrt(U^2+V^2), P))
-//     T  dorsal EXTENSION torque about the MCP joint, N*m (>= 0);
-//        dorsal actuator force = T / moment arm
+//     P    pressing force on the fingertip pad, N (>= 0)
+//     U    tilt along the pad's u axis, N    (in-plane part of the force;
+//     V    tilt along the pad's v axis, N     angle = atan2(sqrt(U^2+V^2), P))
+//     Bar  target PRESSURE of the dorsal actuator, bar. The relay computes it from
+//          the wanted force and the actuator length with the actuator force model.
+//          The rest pressure (relay --rest-bar, default 1.0) means no force;
+//          LOWER pressure = MORE force (the actuator pulls as pressure drops).
 //   cs = XOR of every character before '*', as two hex digits
 //
-// Values are already scaled in Unity to the hardware (_padForceGain, _dorsalGain).
-// When Unity goes quiet the relay itself sends zeros. If the RELAY dies, nothing
+// Lines starting with 'G' (the older torque format) are rejected on purpose:
+// a torque read as a pressure would be wrong, so a mismatched relay = no link = rest.
+// When Unity goes quiet the relay itself sends rest. If the RELAY dies, nothing
 // arrives at all -- so check alive() and go to rest when it is false.
 //
 // Usage:
@@ -26,8 +29,8 @@
 //   void loop() {
 //     glove.poll(Serial);                       // non-blocking, call every loop
 //     if (!glove.alive()) { /* go to rest: no force on any actuator */ }
-//     float pressThumb  = glove.finger[0].pressN;
-//     float torqueIndex = glove.finger[1].torqueNm;
+//     float pressThumb = glove.finger[0].pressN;
+//     float barIndex   = glove.finger[1].dorsalBar;
 //     ...
 //   }
 // Anything else your sketch prints on Serial still shows up in the relay's console.
@@ -40,7 +43,7 @@ struct GloveFingerTarget {
   float pressN;     // pressing force on the pad, N
   float tiltU;      // N
   float tiltV;      // N
-  float torqueNm;   // dorsal extension torque, N*m
+  float dorsalBar;  // dorsal actuator target pressure, bar (rest pressure = no force)
 };
 
 class GloveSerialLink {
@@ -48,7 +51,7 @@ class GloveSerialLink {
   static const uint8_t THUMB = 0;
   static const uint8_t INDEX = 1;
 
-  GloveFingerTarget finger[2] = {};   // latest valid targets (zeros until the first line)
+  GloveFingerTarget finger[2] = {};   // latest valid targets (zeros until the first line: check alive())
   uint32_t seq = 0;                   // Unity's sequence number of that line
   uint32_t goodLines = 0;             // counters, for debugging the link
   uint32_t badLines = 0;
@@ -69,7 +72,7 @@ class GloveSerialLink {
     len_ = 0;
     overflow_ = false;
     if (ok) { lastMs_ = nowMs; haveAny_ = true; goodLines++; }
-    else if (buf_[0] == 'G') badLines++;           // other text is not ours: ignore quietly
+    else if (buf_[0] == 'H') badLines++;           // other text is not ours: ignore quietly
     return ok;
   }
 
@@ -107,11 +110,11 @@ class GloveSerialLink {
     return -1;
   }
 
-  // Valid only if: starts with "G,", has "*hh" with a matching XOR checksum, and
-  // has exactly 9 fields after the G, all numbers.
+  // Valid only if: starts with "H,", has "*hh" with a matching XOR checksum, and
+  // has exactly 9 fields after the H, all numbers.
   bool parse(char* line)
   {
-    if (line[0] != 'G' || line[1] != ',') return false;
+    if (line[0] != 'H' || line[1] != ',') return false;
     char* star = strchr(line, '*');
     if (!star || hexVal(star[1]) < 0 || hexVal(star[2]) < 0 || star[3] != 0) return false;
     uint8_t cs = 0;
@@ -138,7 +141,7 @@ class GloveSerialLink {
       finger[f].pressN   = v[4 * f + 0] > 0 ? v[4 * f + 0] : 0;
       finger[f].tiltU    = v[4 * f + 1];
       finger[f].tiltV    = v[4 * f + 2];
-      finger[f].torqueNm = v[4 * f + 3] > 0 ? v[4 * f + 3] : 0;
+      finger[f].dorsalBar = v[4 * f + 3];         // the sketch clamps it to its own range
     }
     seq = s;
     return true;

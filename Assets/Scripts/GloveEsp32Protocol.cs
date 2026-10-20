@@ -5,13 +5,16 @@ using UnityEngine;
 /// Change a number here, change it there. Nothing in this file touches the scene, so it can
 /// be tested outside Play mode.
 ///
-/// Unity -> each ESP32, port 5011, 14 float32 little-endian (56 bytes). Both boards get the
-/// same packet; each reads only its own finger (FINGER_ID in config.h).
+/// Unity -> PC relay (or each ESP32), port 5011, 16 float32 little-endian (64 bytes). Both
+/// "boards" get the same packet; each reads only its own finger (FINGER_ID in config.h).
 ///   0 sequence | 1 Unity time (s) | 2 tracking trust 0..1
-///   3..6   thumb:  contact 0/1, pressing force P (N), tilt u (N), tilt v (N)
-///   7..10  index:  contact 0/1, pressing force P (N), tilt u (N), tilt v (N)
-///   11 thumb dorsal EXTENSION torque (N*m, >= 0) | 12 index dorsal extension torque
-///   13 protocol version (boards drop packets whose version does not match)
+///   3..8   thumb, 9..14 index -- per finger, in this order (offsets Cmd*Offset):
+///          +0 contact 0/1 | +1 pressing force P (N) | +2 tilt u (N) | +3 tilt v (N)
+///          +4 dorsal EXTENSION torque T (N*m, >= 0)
+///          +5 dorsal actuator length L (mm), from the tracked finger flexion; the relay's
+///             actuator force model needs it. Sent UNCLAMPED: the relay clamps it to the
+///             model's calibrated range
+///   15 protocol version (receivers drop packets whose version does not match)
 ///
 /// Each ESP32 -> Unity, port 5012, 16 float32 (64 bytes). Broadcast until a command
 /// arrives, unicast to the sender after that.
@@ -22,17 +25,20 @@ using UnityEngine;
 /// </summary>
 public static class GloveEsp32Protocol
 {
-    public const int Version = 2;
+    public const int Version = 3; // 3: 16 floats, per finger contact, P, U, V, torque T, length L
     public const int CommandPort = 5011;
     public const int TelemetryPort = 5012;
 
     // ---- command packet ----------------------------------------------------
-    public const int CmdFloats = 14;
+    public const int CmdFloats = 16;
     public const int CmdBytes = CmdFloats * 4;
     public const int CmdSeq = 0, CmdTime = 1, CmdTrust = 2;
-    public const int CmdThumbBase = 3, CmdIndexBase = 7; // +0 contact, +1 P, +2 tilt u, +3 tilt v
-    public const int CmdThumbTorque = 11, CmdIndexTorque = 12;
-    public const int CmdVersion = 13;
+    public const int CmdThumbBase = 3, CmdIndexBase = 9, CmdFingerFloats = 6;
+    public const int CmdContactOffset = 0, CmdPressOffset = 1, CmdTiltUOffset = 2, CmdTiltVOffset = 3,
+                     CmdTorqueOffset = 4, CmdLengthOffset = 5;
+    public const int CmdThumbTorque = CmdThumbBase + CmdTorqueOffset, CmdIndexTorque = CmdIndexBase + CmdTorqueOffset;
+    public const int CmdThumbDorsalLength = CmdThumbBase + CmdLengthOffset, CmdIndexDorsalLength = CmdIndexBase + CmdLengthOffset;
+    public const int CmdVersion = 15;
 
     // ---- telemetry packet --------------------------------------------------
     public const int TlmFloats = 16;
@@ -150,6 +156,20 @@ public static class GloveEsp32Protocol
             V = d,
             FlexAxis = flex,
         };
+    }
+
+    /// <summary>
+    /// Signed flexion angle (rad) at <paramref name="joint"/>, between the bone coming in from
+    /// <paramref name="prev"/> and the bone going out to <paramref name="next"/>. Positive = flexed
+    /// (rotation about <paramref name="flexAxis"/>, the same axis convention as the pad frame),
+    /// negative = hyperextended, 0 = straight or a bone too short to tell.
+    /// </summary>
+    public static float FlexionRad(Vector3 prev, Vector3 joint, Vector3 next, Vector3 flexAxis)
+    {
+        Vector3 a = joint - prev, b = next - joint;
+        if (a.sqrMagnitude < 1e-12f || b.sqrMagnitude < 1e-12f) return 0f;
+        a = a.normalized; b = b.normalized;
+        return Mathf.Atan2(Vector3.Dot(Vector3.Cross(a, b), flexAxis.normalized), Vector3.Dot(a, b));
     }
 
     /// <summary>

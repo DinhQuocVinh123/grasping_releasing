@@ -29,7 +29,7 @@ void loop()
   // force-to-pressure code:
   //   .pressN    pressing force on the pad (N)
   //   .tiltU/V   in-plane part of the force (N)
-  //   .torqueNm  dorsal extension torque (N*m); dorsal force = torqueNm / moment arm
+  //   .dorsalBar dorsal actuator target pressure (bar); rest pressure = no force
 
   static uint32_t lastPrint = 0;
   if (millis() - lastPrint >= 200) {         // echo back 5x per second
@@ -41,7 +41,7 @@ void loop()
       Serial.print(glove.finger[f].pressN, 3);
       Serial.print(F(" U ")); Serial.print(glove.finger[f].tiltU, 3);
       Serial.print(F(" V ")); Serial.print(glove.finger[f].tiltV, 3);
-      Serial.print(F(" T ")); Serial.print(glove.finger[f].torqueNm, 4);
+      Serial.print(F(" bar ")); Serial.print(glove.finger[f].dorsalBar, 3);
     }
     Serial.print(F(" | good ")); Serial.print(glove.goodLines);
     Serial.print(F(" bad ")); Serial.println(glove.badLines);
