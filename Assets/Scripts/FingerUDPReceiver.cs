@@ -91,6 +91,21 @@ public class FingerUDPReceiver : MonoBehaviour
     private readonly System.Text.StringBuilder _diagLine = new System.Text.StringBuilder(1400); // dung lai moi khung
     private GloveLiveStreamer _streamer;
     private FingertipSurfaceConstraint _constraint;
+    private GloveWristStabilizer _wristStabilizer;
+
+    // --- Do tre tung khau (20/10): moi anh co ket qua 1 dong glove_latency_*.csv (cung _logDiagnostics) ---
+    // Luong nhan ghi luc goi tin toi + phan "tm:" Python gui kem; luong chinh ghep voi moc thoi gian tren kinh
+    // (GloveLiveStreamer.TryGetFrameTimings) va luc ImageHandSolver lay ket qua. tools/latency_breakdown.py doc file nay.
+    private struct PacketTiming { public int Fid; public double Arrive; public string Py; }
+    private readonly System.Collections.Concurrent.ConcurrentQueue<PacketTiming> _timingQueue =
+        new System.Collections.Concurrent.ConcurrentQueue<PacketTiming>();
+    private readonly System.Collections.Generic.List<PacketTiming> _pendingTimings = new System.Collections.Generic.List<PacketTiming>();
+    private const int PickHistory = 64;
+    private readonly int[] _pickFid = new int[PickHistory];
+    private readonly double[] _pickTime = new double[PickHistory];
+    private int _lastPickFid;
+    private const int PyTimingFields = 11; // so truong trong "tm:" (run_glove_quest_stream.py)
+    private System.IO.StreamWriter _latencyLog;
 
     private void Awake()
     {
@@ -148,6 +163,8 @@ public class FingerUDPReceiver : MonoBehaviour
         if (_handVisual != null) _handVisual.WhenHandVisualUpdated -= ApplyHand;
         _diag?.Dispose();
         _diag = null;
+        _latencyLog?.Dispose();
+        _latencyLog = null;
     }
 
     /// <summary>Tong goc gap (do) cua 1 ngon (0 = duoi thang) -- de uoc luong muc co cua actuator.
@@ -180,6 +197,13 @@ public class FingerUDPReceiver : MonoBehaviour
             if (!_latestPixelValid || frameId <= 0) return false;
             Array.Copy(_latestUV, uv, HandImageFit.Points);
             Array.Copy(_latestConf, conf, HandImageFit.Points);
+            if (frameId != _lastPickFid)
+            {
+                // Lan dau tay ao lay ket qua anh nay (cot pick_ms trong glove_latency)
+                _lastPickFid = frameId;
+                _pickFid[frameId % PickHistory] = frameId;
+                _pickTime[frameId % PickHistory] = GloveLiveStreamer.ClockNow;
+            }
             return true;
         }
     }
@@ -195,7 +219,8 @@ public class FingerUDPReceiver : MonoBehaviour
             while (_running)
             {
                 byte[] data = _udpClient.Receive(ref remoteEP); // chan toi khi co goi tin
-                ParseAndStore(System.Text.Encoding.UTF8.GetString(data));
+                double arrive = GloveLiveStreamer.ClockNow;
+                ParseAndStore(System.Text.Encoding.UTF8.GetString(data), arrive);
             }
         }
         catch (SocketException)
@@ -204,19 +229,22 @@ public class FingerUDPReceiver : MonoBehaviour
         }
     }
 
-    /// <summary>Goi tin dang "valid:1,fid:123,pv:x|y;...,pc:c;...,dv:x|y,da:0.07". "valid" luon dung dau.</summary>
-    private void ParseAndStore(string msg)
+    /// <summary>Goi tin dang "valid:1,fid:123,pv:x|y;...,pc:c;...,dv:x|y,da:0.07,tm:..." "valid" luon dung dau;
+    /// "tm" (tuy chon) = thoi gian tung khau ben Python cho anh nay. arrive = luc goi tin toi (ClockNow).</summary>
+    private void ParseAndStore(string msg, double arrive)
     {
         _packetArrived = true;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         lock (_lock)
         {
+            string pyTimings = null;
             foreach (var part in msg.Split(','))
             {
                 var kv = part.Split(':');
                 if (kv.Length != 2) continue;
                 string key = kv[0].Trim();
                 if (key == "pv") { ParsePixelPoints(kv[1]); continue; }
+                if (key == "tm") { pyTimings = kv[1]; continue; }
                 if (key == "pc") { ParsePixelConf(kv[1]); continue; }
                 if (key == "dv")
                 {
@@ -238,6 +266,8 @@ public class FingerUDPReceiver : MonoBehaviour
                 if (key == "fid") { _latestFrameId = (int)v; continue; }
                 if (key == "da") { _latestDorsalArea = v; _latestDorsal = v > 0f ? 1 : 0; continue; }
             }
+            if (_logDiagnostics && pyTimings != null && _latestFrameId > 0)
+                _timingQueue.Enqueue(new PacketTiming { Fid = _latestFrameId, Arrive = arrive, Py = pyTimings });
         }
     }
 
@@ -284,7 +314,11 @@ public class FingerUDPReceiver : MonoBehaviour
     private void LateUpdate()
     {
         ApplyHand();
-        if (_logDiagnostics) WriteDiagnostics();
+        if (_logDiagnostics)
+        {
+            WriteDiagnostics();
+            WriteLatencyLog();
+        }
     }
 
     /// <summary>Goi ngay sau khi HandVisual ghi xong khop (va lai trong LateUpdate).</summary>
@@ -376,6 +410,16 @@ public class FingerUDPReceiver : MonoBehaviour
             head.Append(",dtms,streamms,conms,sqms");
             // Muc tin ket qua anh gan nhat (ImageHandSolver) + trang thai kep bong cua tay nay (FingertipSurfaceConstraint.PinchStatus)
             head.Append(",trust,pinchst");
+            // Do tre + tay ra khoi khung (18/10): tuoi anh vua giai, co tay hien lech ket qua giai (bo loc), muc tin
+            // co tay / ngon cai / ngon tro, so diem sat mep, trang thai (0 du / 1 mot phan / 2 mat), gate luc, ngon giu dang
+            head.Append(",age_ms,lag_mm,lag_deg,wtrust,ttrust,itrust,edgepts,hstate,fweight,tfrozen,ifrozen");
+            // Do tre tay ao so voi tay that (19/10): dong ho chung realtimeSinceStartup cho dong nay (rt), tuoi anh tinh tu luc
+            // phoi sang, camera -> Unity, va co tay giai THO cua anh gan nhat kem luc phoi sang anh do (sexp; 0 = khong biet).
+            // tools/latency_diag.py so (rt, wx..wz) voi (sexp, sx..sz) de tim do tre.
+            head.Append(",rt,exp_age_ms,cam_ms,sexp,sx,sy,sz");
+            // Co tay Quest THO (truoc GloveWristStabilizer) -- thu kha thi bu tre bang Quest (20/10): vi tri the gioi, khung
+            // nay Quest co theo doi khong, do tin cay cao khong, luc nhan (realtime). tools/quest_raw_feasibility.py doc cac cot nay.
+            head.Append(",qrx,qry,qrz,qvalid,qconf,qrt");
             _diag.WriteLine(head.ToString());
             Debug.Log($"[FingerUDPReceiver] Ghi chan doan vao {path}", this);
         }
@@ -424,7 +468,85 @@ public class FingerUDPReceiver : MonoBehaviour
           .Append(',').Append(SquishyPinchable.FrameMs.ToString("F2", inv))
           .Append(',').Append((ok ? s.LastTrust : 0f).ToString("F2", inv))
           .Append(',').Append(_constraint != null ? _constraint.PinchStatus : -1);
+        foreach (float v in new[] { ok ? s.FrameAgeMs : 0f, ok ? s.LagMm : 0f, ok ? s.LagDeg : 0f })
+            sb.Append(',').Append(v.ToString("F1", inv));
+        foreach (float v in new[] { ok ? s.WristTrust : 0f, ok ? s.ThumbTrust : 0f, ok ? s.IndexTrust : 0f })
+            sb.Append(',').Append(v.ToString("F2", inv));
+        sb.Append(',').Append(ok ? s.EdgePoints : 0)
+          .Append(',').Append(ok ? s.State : 2)
+          .Append(',').Append((ok ? s.ForceWeight : 0f).ToString("F2", inv))
+          .Append(',').Append(ok && s.ThumbFrozen ? 1 : 0)
+          .Append(',').Append(ok && s.IndexFrozen ? 1 : 0);
+        Vector3 raw = ok ? s.RawWrist : Vector3.zero;
+        sb.Append(',').Append(Time.realtimeSinceStartup.ToString("F4", inv))
+          .Append(',').Append((ok ? s.ExposureAgeMs : 0f).ToString("F1", inv))
+          .Append(',').Append((_streamer != null ? _streamer.LastCameraAgeMs : -1f).ToString("F1", inv))
+          .Append(',').Append((ok ? s.RawExposureTime : 0f).ToString("F4", inv));
+        foreach (float v in new[] { raw.x, raw.y, raw.z }) sb.Append(',').Append(v.ToString("F5", inv));
+        if (_wristStabilizer == null && Time.frameCount % 60 == 0) _wristStabilizer = FindAnyObjectByType<GloveWristStabilizer>();
+        GloveWristStabilizer q = _wristStabilizer;
+        Vector3 qp = q != null ? q.RawWorldRoot.position : Vector3.zero;
+        foreach (float v in new[] { qp.x, qp.y, qp.z }) sb.Append(',').Append(v.ToString("F5", inv));
+        sb.Append(',').Append(q != null && q.RawValid ? 1 : 0)
+          .Append(',').Append(q != null && q.RawHighConfidence ? 1 : 0)
+          .Append(',').Append((q != null ? q.RawTime : 0f).ToString("F4", inv));
         _diag.WriteLine(sb);
         if (Time.frameCount % 72 == 0) _diag.Flush(); // khong mat du lieu neu ung dung bi tat ngang
+    }
+
+    /// <summary>Ghi glove_latency: moi anh co ket qua 1 dong, khi tay ao da lay ket qua do (hoac 0.5 s sau khi toi
+    /// ma chua lay -- anh moi hon da ve truoc, pick_ms = -1). Moi cot la ms giua 2 moc lien tiep:
+    /// phoi sang -> xin anh (cam) -> GPU tra anh (rb) -> luong phu bat dau nen (wq) -> nen xong (enc) -> gui xong (send)
+    /// -> ket qua ve toi kinh (rtt; gom WiFi di + xep hang + Python + WiFi ve) -> tay ao lay (pick).</summary>
+    private void WriteLatencyLog()
+    {
+        while (_timingQueue.TryDequeue(out PacketTiming p)) _pendingTimings.Add(p);
+        if (_pendingTimings.Count == 0) return;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (_latencyLog == null)
+        {
+            string path = System.IO.Path.Combine(Application.persistentDataPath,
+                "glove_latency_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
+            _latencyLog = new System.IO.StreamWriter(path, false, new System.Text.UTF8Encoding(false));
+            _latencyLog.WriteLine("fid,arr_s,jpeg_kb,cam_ms,rb_ms,wq_ms,enc_ms,send_ms,rtt_ms," +
+                                  "py_blocked,py_wait_ms,py_xfer_ms,py_decode_ms,py_infer_ms,py_ninfer,py_other_ms,py_pc_ms," +
+                                  "py_prev_cycle_ms,py_prev_tail_ms,py_dropped,pick_ms,total_ms");
+            Debug.Log($"[FingerUDPReceiver] Ghi do tre tung khau vao {path}", this);
+        }
+        if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
+        double now = GloveLiveStreamer.ClockNow;
+        var sb = new System.Text.StringBuilder(256);
+        int keep = 0;
+        for (int i = 0; i < _pendingTimings.Count; i++)
+        {
+            PacketTiming p = _pendingTimings[i];
+            int ps = p.Fid % PickHistory;
+            bool picked = _pickFid[ps] == p.Fid;
+            if (!picked && now - p.Arrive < 0.5)
+            {
+                _pendingTimings[keep++] = p; // cho tay ao lay ket qua nay
+                continue;
+            }
+            GloveLiveStreamer.FrameTimings t = default;
+            bool ok = _streamer != null && _streamer.TryGetFrameTimings(p.Fid, out t);
+            string Ms(double from, double to) => ok && from > 0 && to > 0 ? ((to - from) * 1000.0).ToString("F1", inv) : "-1";
+            sb.Clear();
+            sb.Append(p.Fid).Append(',').Append(p.Arrive.ToString("F4", inv))
+              .Append(',').Append(ok ? (t.JpegBytes / 1024f).ToString("F1", inv) : "-1")
+              .Append(',').Append(ok ? t.CameraAgeMs.ToString("F1", inv) : "-1")
+              .Append(',').Append(Ms(t.Capture, t.Readback))
+              .Append(',').Append(Ms(t.Readback, t.EncodeStart))
+              .Append(',').Append(Ms(t.EncodeStart, t.EncodeEnd))
+              .Append(',').Append(Ms(t.EncodeEnd, t.Sent))
+              .Append(',').Append(Ms(t.Sent, p.Arrive));
+            string[] py = p.Py.Split('|');
+            for (int k = 0; k < PyTimingFields; k++) sb.Append(',').Append(k < py.Length ? py[k] : "");
+            sb.Append(',').Append(picked ? Ms(p.Arrive, _pickTime[ps]) : "-1");
+            sb.Append(',').Append(picked && ok && t.CameraAgeMs >= 0f
+                ? (t.CameraAgeMs + (_pickTime[ps] - t.Capture) * 1000.0).ToString("F1", inv) : "-1");
+            _latencyLog.WriteLine(sb);
+        }
+        _pendingTimings.RemoveRange(keep, _pendingTimings.Count - keep);
+        if (Time.frameCount % 72 == 0) _latencyLog.Flush();
     }
 }

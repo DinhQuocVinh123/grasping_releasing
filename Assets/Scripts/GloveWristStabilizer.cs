@@ -52,6 +52,14 @@ public class GloveWristStabilizer : Hand
     public int HeldFrames { get; private set; }
     public int Reacquires { get; private set; }
 
+    /// <summary>Co tay Quest THO (truoc moi buoc chong nhay / loc o day), toa do the gioi, lan Quest cap nhat gan nhat --
+    /// de do Quest nhin tay deo gang tre va rung bao nhieu (glove_diag cot qrx..). RawValid = khung do Quest dang theo doi tay.</summary>
+    public Pose RawWorldRoot { get; private set; }
+    public bool RawValid { get; private set; }
+    public bool RawHighConfidence { get; private set; }
+    /// <summary>Time.realtimeSinceStartup luc nhan du lieu tho gan nhat.</summary>
+    public float RawTime { get; private set; }
+
     private readonly HandDataAsset _last = new HandDataAsset();
     private IOneEuroFilter<Vector3> _posFilter;
     private IOneEuroFilter<Quaternion> _rotFilter;
@@ -75,6 +83,7 @@ public class GloveWristStabilizer : Hand
     {
         base.Apply(data);
         float dt = Mathf.Max(Time.deltaTime, 1e-4f);
+        RecordRaw(data);
 
         // Quest mat tay: giu dang cuoi cung mot chut (tranh tay ao chop tat)
         if (!data.IsDataValid || !data.IsTracked)
@@ -163,6 +172,18 @@ public class GloveWristStabilizer : Hand
         }
 
         Output(data, target.position, target.rotation, dt, alreadyFiltered: false);
+    }
+
+    /// <summary>Ghi co tay Quest tho (chi chan doan, khong doi du lieu). data.Root la toa do tracking -> doi sang the gioi
+    /// bang chinh TrackingToWorldTransformer cua khung du lieu nay (nhu Hand.GetRootPose).</summary>
+    private void RecordRaw(HandDataAsset data)
+    {
+        RawValid = data.IsDataValid && data.IsTracked;
+        if (!RawValid) return;
+        var toWorld = data.Config != null ? data.Config.TrackingToWorldTransformer : null;
+        RawWorldRoot = toWorld != null ? toWorld.ToWorldPose(data.Root) : data.Root;
+        RawHighConfidence = data.IsHighConfidence;
+        RawTime = Time.realtimeSinceStartup;
     }
 
     private void Output(HandDataAsset data, Vector3 pos, Quaternion rot, float dt, bool alreadyFiltered)

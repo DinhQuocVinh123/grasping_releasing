@@ -51,6 +51,12 @@ public class GloveLiveStreamer : MonoBehaviour
     [SerializeField] private float _sendIntervalSeconds = 0.05f;
     [Tooltip("Chất lượng nén JPEG (0-100). Thấp hơn = gửi nhanh hơn, đỡ nghẽn WiFi, nhưng model có thể kém chính xác hơn chút.")]
     [SerializeField] private int _jpegQuality = 80;
+    [Tooltip("Thu nho anh truoc khi nen (luong phu): 1 = anh goc, 2 = moi chieu 1/2 (it diem anh hon 4 lan). Nen JPEG, " +
+             "WiFi va giai nen ben may tinh nhanh hon ~3 lan. glove_latency 20/10 11:11: 3 khau nay ~75 ms/anh voi anh goc. " +
+             "Model gan nhu khong doi: lech trung vi 0.007, p90 diem lech nhat 0.021 long ban tay (test_downscale_accuracy.py, " +
+             "ban ghi 20261020_112908). Can run_glove_quest_stream.py ban 20/10 (phong lai anh); can bat _sendHandHint.")]
+    [SerializeField, Range(1, 4)] private int _downscale = 2;
+
 
     [Header("Gỡ lỗi -- dùng CHUNG giá trị đã xác nhận đúng ở GloveDatasetCollector")]
     [Tooltip("Nếu ảnh nhận được trên máy tính bị lộn ngược trên-dưới, đảo giá trị này. " +
@@ -99,6 +105,7 @@ public class GloveLiveStreamer : MonoBehaviour
     private int _readbackId;                  // anh GPU tra ve tre (sau khi da thoi doi) thi bo
     private volatile bool _connectionBroken;  // luong phu bao mat ket noi, luong chinh dong lai
     private Color32[] _flipBuffer;            // chi luong phu dung
+    private Color32[] _scaledBuffer;          // anh da thu nho (chi luong phu dung)
 
     // 2 o anh xoay vong: luong phu nen/gui o nay trong khi GPU tra anh ke tiep vao o kia -> doc anh (1-3 khung)
     // chong len thoi gian nen, van giu ~18 anh/giay. Chi 1 o: anh ve cham hon 1 chut la lo nhip gui, con 8-9 anh/giay
@@ -107,7 +114,8 @@ public class GloveLiveStreamer : MonoBehaviour
     {
         public Color32[] Pixels;
         public readonly byte[] Header = new byte[24];
-        public int HeaderLength, Width, Height;
+        public int HeaderLength, Width, Height, FrameId;
+        public int Downscale = 1; // he so thu nho ghi trong phan dau goi tin (byte 21)
     }
     private readonly FrameSlot[] _slots = { new FrameSlot(), new FrameSlot() };
     private volatile FrameSlot _workerSlot;   // o luong phu dang nen/gui
@@ -121,7 +129,35 @@ public class GloveLiveStreamer : MonoBehaviour
     private const int PoseHistory = 64;
     private readonly int[] _poseIds = new int[PoseHistory];
     private readonly Pose[] _poses = new Pose[PoseHistory];
+    // Thoi diem chup tung anh (Time.realtimeSinceStartup) -- de do "tuoi" ket qua Python khi ve toi Unity (chan doan do tre)
+    private readonly float[] _captureTimes = new float[PoseHistory];
+    // Thoi diem camera PHOI SANG anh do (PassthroughCameraAccess.Timestamp, doi sang Time.realtimeSinceStartup) --
+    // som hon _captureTimes mot doan (camera xu ly + doi Unity lay anh). NaN = khong doc duoc.
+    private readonly float[] _exposureTimes = new float[PoseHistory];
+    /// <summary>Anh moi nhat da phoi sang cach luc lay bao nhieu ms (camera -> Unity), -1 = khong doc duoc.</summary>
+    public float LastCameraAgeMs { get; private set; } = -1f;
     private int _frameId;
+
+    // --- Do tre tung khau tren kinh (20/10) -------------------------------------
+    // Moc thoi gian cua tung anh theo ClockNow (dung duoc o MOI luong, khac Time.realtimeSinceStartup chi dung o luong
+    // chinh): xin anh GPU, GPU tra anh, luong phu bat dau nen, nen xong, gui xong. FingerUDPReceiver ghi glove_latency_*.csv.
+    /// <summary>Dong ho (giay) dung chung cho cac moc do tre -- goi duoc tu luong phu.</summary>
+    public static double ClockNow => System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency;
+    public struct FrameTimings
+    {
+        public double Capture, Readback, EncodeStart, EncodeEnd, Sent;
+        public float CameraAgeMs; // phoi sang -> xin anh, -1 = khong doc duoc
+        public int JpegBytes;
+    }
+    private readonly FrameTimings[] _timings = new FrameTimings[PoseHistory];
+
+    /// <summary>Moc thoi gian cua anh so frameId tren kinh (neu con trong bo nho gan day). Moc chua toi = 0.</summary>
+    public bool TryGetFrameTimings(int frameId, out FrameTimings timings)
+    {
+        int slot = ((frameId % PoseHistory) + PoseHistory) % PoseHistory;
+        timings = _timings[slot];
+        return frameId > 0 && _poseIds[slot] == frameId;
+    }
     private readonly byte[] _header = new byte[24]; // BuildHeader ghi o day, roi chep sang o anh
 
     // Tam tay (khop goc ngon giua) + chieu dai long ban tay THEO QUEST luc chup tung anh -- chinh
@@ -140,6 +176,24 @@ public class GloveLiveStreamer : MonoBehaviour
         int slot = ((frameId % PoseHistory) + PoseHistory) % PoseHistory;
         pose = _poses[slot];
         return frameId > 0 && _poseIds[slot] == frameId;
+    }
+
+    /// <summary>Anh so frameId da chup cach day bao nhieu giay (anh WiFi + nen + Python + goi tin ve).
+    /// Tinh tu luc xin anh GPU -- chua gom do tre rieng cua camera truoc luc do.</summary>
+    public bool TryGetFrameAge(int frameId, out float ageSeconds)
+    {
+        int slot = ((frameId % PoseHistory) + PoseHistory) % PoseHistory;
+        bool ok = frameId > 0 && _poseIds[slot] == frameId;
+        ageSeconds = ok ? Time.realtimeSinceStartup - _captureTimes[slot] : 0f;
+        return ok;
+    }
+
+    /// <summary>Thoi diem camera phoi sang anh so frameId, theo dong ho Time.realtimeSinceStartup (de so voi luc tay ao hien).</summary>
+    public bool TryGetFrameExposureTime(int frameId, out float realtime)
+    {
+        int slot = ((frameId % PoseHistory) + PoseHistory) % PoseHistory;
+        realtime = _exposureTimes[slot];
+        return frameId > 0 && _poseIds[slot] == frameId && !float.IsNaN(realtime);
     }
 
     /// <summary>Tam tay va chieu dai long ban tay theo Quest luc chup anh frameId (diem goi y).</summary>
@@ -188,7 +242,8 @@ public class GloveLiveStreamer : MonoBehaviour
 
     /// <summary>Phan dau 24 byte truoc anh JPEG (big-endian, khop run_glove_quest_stream.py):
     /// "GLV1" | uint32 so thu tu anh | float32 tam tay x, y (pixel, goc tren-trai) |
-    /// float32 kich thuoc tay (pixel, ~chieu dai long ban tay) | uint8 co hop le | 3 byte trong.</summary>
+    /// float32 kich thuoc tay (pixel, ~chieu dai long ban tay) | uint8 co hop le | uint8 he so thu nho anh (_downscale;
+    /// toa do goi y van theo anh GOC) | 2 byte trong.</summary>
     private void BuildHeader(int frameId, Pose camPose, int width, int height)
     {
         float hx = 0f, hy = 0f, size = 0f;
@@ -235,7 +290,10 @@ public class GloveLiveStreamer : MonoBehaviour
         WriteBigEndian(_header, 12, BitConverter.ToUInt32(BitConverter.GetBytes(hy), 0));
         WriteBigEndian(_header, 16, BitConverter.ToUInt32(BitConverter.GetBytes(size), 0));
         _header[20] = (byte)(valid ? 1 : 0);
-        _header[21] = _header[22] = _header[23] = 0;
+        // Chi thu nho khi chia het (Python phong lai = co goc nhan he so -- toa do goi y tinh theo co goc)
+        int scale = Mathf.Clamp(_downscale, 1, 4);
+        _header[21] = (byte)(width % scale == 0 && height % scale == 0 ? scale : 1);
+        _header[22] = _header[23] = 0;
     }
 
     private static void WriteBigEndian(byte[] buf, int offset, uint v)
@@ -306,8 +364,16 @@ public class GloveLiveStreamer : MonoBehaviour
                 FrameSlot slot = _workerSlot;
                 int w = slot.Width, h = slot.Height;
                 Color32[] pixels = slot.Pixels;
+                int ts = slot.FrameId % PoseHistory;
+                _timings[ts].EncodeStart = ClockNow;
                 sw.Restart();
-                if (_imageIsBottomUp)
+                if (slot.Downscale > 1)
+                {
+                    pixels = Downscale(pixels, w, h, slot.Downscale);
+                    w /= slot.Downscale;
+                    h /= slot.Downscale;
+                }
+                else if (_imageIsBottomUp)
                 {
                     if (_flipBuffer == null || _flipBuffer.Length != pixels.Length) _flipBuffer = new Color32[pixels.Length];
                     for (int y = 0; y < h; y++) Array.Copy(pixels, y * w, _flipBuffer, (h - 1 - y) * w, w);
@@ -316,12 +382,15 @@ public class GloveLiveStreamer : MonoBehaviour
                 byte[] jpg = ImageConversion.EncodeArrayToJPG(pixels,
                     UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_UNorm, (uint)w, (uint)h, 0, _jpegQuality);
                 _encodeMs = (float)sw.Elapsed.TotalMilliseconds;
+                _timings[ts].EncodeEnd = ClockNow;
+                _timings[ts].JpegBytes = jpg.Length;
 
                 sw.Restart();
                 NetworkStream stream = _stream;
                 if (stream != null)
                 {
                     WriteFramed(stream, slot.Header, slot.HeaderLength, jpg);
+                    _timings[ts].Sent = ClockNow;
                     _sentCount++;
                     _lastStatus = "OK";
                 }
@@ -336,6 +405,40 @@ public class GloveLiveStreamer : MonoBehaviour
             finally
             {
                 _workerBusy = false;
+            }
+        }
+    }
+
+    /// <summary>Thu nho anh vao bo dem dung lai, lat tren-duoi neu _imageIsBottomUp (giong nhanh anh goc). Chi luong phu goi.</summary>
+    private Color32[] Downscale(Color32[] src, int w, int h, int f)
+    {
+        int size = (w / f) * (h / f);
+        if (_scaledBuffer == null || _scaledBuffer.Length != size) _scaledBuffer = new Color32[size];
+        DownscaleInto(src, w, h, f, _imageIsBottomUp, _scaledBuffer);
+        return _scaledBuffer;
+    }
+
+    /// <summary>Thu nho anh f lan moi chieu: trung binh tung o f x f (nhu cv2.INTER_AREA ma test_downscale_accuracy.py da
+    /// thu), flipRows = hang tren cung cua anh nguon thanh hang duoi cung. dst dai (w/f)*(h/f). Public de thu trong Editor.</summary>
+    public static void DownscaleInto(Color32[] src, int w, int h, int f, bool flipRows, Color32[] dst)
+    {
+        int ow = w / f, oh = h / f, n = f * f, half = n / 2;
+        for (int oy = 0; oy < oh; oy++)
+        {
+            int dst0 = (flipRows ? oh - 1 - oy : oy) * ow;
+            for (int ox = 0; ox < ow; ox++)
+            {
+                int r = 0, g = 0, b = 0;
+                for (int dy = 0; dy < f; dy++)
+                {
+                    int s = (oy * f + dy) * w + ox * f;
+                    for (int dx = 0; dx < f; dx++)
+                    {
+                        Color32 c = src[s + dx];
+                        r += c.r; g += c.g; b += c.b;
+                    }
+                }
+                dst[dst0 + ox] = new Color32((byte)((r + half) / n), (byte)((g + half) / n), (byte)((b + half) / n), 255);
             }
         }
     }
@@ -477,6 +580,15 @@ public class GloveLiveStreamer : MonoBehaviour
             int slot = _frameId % PoseHistory;
             _poseIds[slot] = _frameId;
             _poses[slot] = camPose;
+            _captureTimes[slot] = Time.realtimeSinceStartup;
+            // Timestamp = luc phoi sang (micro giay, cung dong ho voi DateTime.UtcNow) -> doi sang dong ho realtimeSinceStartup.
+            // Ngoai 0..2 s = hai dong ho khong cung goc -> bo (NaN), phan tich se biet.
+            DateTime exposure = _passthroughCamera.Timestamp;
+            float camAge = exposure.Ticks > 0 ? (float)(DateTime.UtcNow - exposure).TotalSeconds : -1f;
+            bool camAgeOk = camAge >= 0f && camAge < 2f;
+            _exposureTimes[slot] = camAgeOk ? _captureTimes[slot] - camAge : float.NaN;
+            LastCameraAgeMs = camAgeOk ? camAge * 1000f : -1f;
+            _timings[slot] = new FrameTimings { Capture = ClockNow, CameraAgeMs = LastCameraAgeMs };
             byte[] header = null;
             if (_sendHandHint)
             {
@@ -491,8 +603,9 @@ public class GloveLiveStreamer : MonoBehaviour
             _readbackPending = true;
             _readbackStartTime = Time.unscaledTime;
             int id = ++_readbackId;
+            int fid = _frameId;
             // Dinh dang goc cua texture (R8G8B8A8, sRGB) -- y het GetColors(); xin doi dinh dang co the bi GPU giai sRGB -> anh toi.
-            AsyncGPUReadback.Request(tex, 0, req => { if (id == _readbackId) OnReadback(req, w, h, header); });
+            AsyncGPUReadback.Request(tex, 0, req => { if (id == _readbackId) OnReadback(req, w, h, header, fid); });
             _mainThreadMs = (float)t0.Elapsed.TotalMilliseconds;
             return true;
         }
@@ -507,7 +620,7 @@ public class GloveLiveStreamer : MonoBehaviour
 
     /// <summary>Anh da doc xong tu GPU (luong chinh, 1-3 khung sau Request): chep vao o anh luong phu KHONG dung,
     /// roi giao ngay (luong phu ranh) hoac de doi (Update giao khi ranh). Phan dau goi tin ghi tu luc chup.</summary>
-    private void OnReadback(AsyncGPUReadbackRequest req, int w, int h, byte[] header)
+    private void OnReadback(AsyncGPUReadbackRequest req, int w, int h, byte[] header, int frameId)
     {
         _readbackPending = false;
         if (!isActiveAndEnabled || !_workerRunning) return;
@@ -517,6 +630,7 @@ public class GloveLiveStreamer : MonoBehaviour
             _lastStatus = "Loi doc anh GPU";
             return;
         }
+        _timings[frameId % PoseHistory].Readback = ClockNow;
         var t0 = System.Diagnostics.Stopwatch.StartNew();
         var colors = req.GetData<Color32>();
         if (colors.Length != w * h) return;
@@ -526,6 +640,8 @@ public class GloveLiveStreamer : MonoBehaviour
         colors.CopyTo(slot.Pixels); // chep vao bo dem dung lai (khong tao mang moi moi lan)
         slot.Width = w;
         slot.Height = h;
+        slot.FrameId = frameId;
+        slot.Downscale = header != null ? Mathf.Max(1, header[21]) : 1; // khong co phan dau -> Python khong biet de phong lai
         slot.HeaderLength = header != null ? header.Length : 0;
         if (header != null) Array.Copy(header, slot.Header, header.Length);
         _mainThreadMs += (float)t0.Elapsed.TotalMilliseconds;

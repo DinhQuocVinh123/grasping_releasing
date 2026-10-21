@@ -365,7 +365,8 @@ public class GloveForceEsp32Output : MonoBehaviour
         float trust = 1f;
         if (_gateOnTracking && _solver != null && _solver.isActiveAndEnabled)
         {
-            trust = _solver.Ready ? _solver.Weight : 0f;
+            // ForceWeight = Weight, but 0 while the thumb or index is frozen out of the camera frame (pose held, not tracked)
+            trust = _solver.Ready ? _solver.ForceWeight : 0f;
             if (_useFitQuality)
                 trust *= Mathf.InverseLerp(_fitQualityRamp.x, _fitQualityRamp.y, _solver.LastTrust);
         }

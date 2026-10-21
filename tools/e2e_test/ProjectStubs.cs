@@ -7,7 +7,7 @@ public class HapticRenderer : MonoBehaviour
     public FingerState[] State = new FingerState[2];
     public FingerState GetState(HapticFinger f) => State[(int)f];
 }
-public class ImageHandSolver : MonoBehaviour { public float LastTrust { get; set; } = 1f; public float Weight { get; set; } = 1f; public bool Ready { get; set; } = true; }
+public class ImageHandSolver : MonoBehaviour { public float LastTrust { get; set; } = 1f; public float Weight { get; set; } = 1f; public float ForceWeight => Weight; public bool Ready { get; set; } = true; }
 public class GloveForceOutput : MonoBehaviour { }
 public class FingertipSurfaceConstraint : MonoBehaviour
 {

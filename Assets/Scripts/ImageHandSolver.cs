@@ -12,13 +12,16 @@ public sealed class ImageHandSolver : MonoBehaviour
 {
     [Tooltip("Moi tang truot muot (co 2 tang noi tiep, giay) tu ket qua da loc sang khung hinh -- de tay chay DEU giua 2 anh " +
              "(18 anh/giay), phan chong rung do bo loc One-Euro ben duoi lo. 1 tang 0.025 (ban 03/10 17:00) don chuyen dong vao " +
-             "1-2 khung sau moi anh -> giat khi nhac vat. Truoc 03/10: 1 tang 0.06 + loc o Python (tre ~115 ms).")]
-    [SerializeField] private float _displaySeconds = 0.02f;
+             "1-2 khung sau moi anh -> giat khi nhac vat. Truoc 03/10: 1 tang 0.06 + loc o Python (tre ~115 ms). " +
+             "20/10: 0.02 -> 0.015 (tools/filter_sim.py tren glove_diag 12:17: cung beta 200 tay ao bot ~18 ms tre, giat khi chay " +
+             "0.45 -> 0.69 mm; 0.01 bot 26 ms nhung giat x2.5).")]
+    [SerializeField] private float _displaySeconds = 0.015f;
     [Header("Loc One-Euro (moi lan giai): tay dung yen -> loc manh, tay chay -> bam nhanh")]
     [Tooltip("Tan so cat khi tay dung yen (Hz). Nho = muot hon nhung tre hon.")]
     [SerializeField] private float _minCutoff = 0.7f;
-    [Tooltip("Tan so cat tang them theo toc do co tay (Hz moi m/s).")]
-    [SerializeField] private float _betaPosition = 80f;
+    [Tooltip("Tan so cat tang them theo toc do co tay (Hz moi m/s). 20/10: 80 -> 200 (bam nhanh hon luc tay bat dau chay, " +
+             "rung dung yen 1.07 -> 1.15 mm mo phong; minCutoff gan nhu khong anh huong do tre).")]
+    [SerializeField] private float _betaPosition = 200f;
     [Tooltip("Tan so cat tang them theo toc do xoay co tay (Hz moi do/s).")]
     [SerializeField] private float _betaRotation = 0.1f;
     [Tooltip("Tan so cat tang them theo toc do gap khop ngon (Hz moi do/s), tinh rieng tung khop.")]
@@ -37,7 +40,8 @@ public sealed class ImageHandSolver : MonoBehaviour
              "TB 0.042, luc 2 ngon sap cham 0.147 -- co tay nhay 26-78 do, ngon cai 10-18 do moi lan, One-Euro tuong tay chay nhanh nen cho qua.")]
     [SerializeField] private float _errGood = 0.07f;
     [SerializeField] private float _errBad = 0.20f;
-    [Tooltip("Huong co tay nhay hon muc nay (do) so voi ket qua da loc ma ket qua ngay truoc KHONG xac nhan -> chi tin 20%.")]
+    [Tooltip("Huong co tay nhay hon muc nay (do) so voi ket qua da loc ma ket qua ngay truoc KHONG xac nhan -> chi tin 20% " +
+             "(che do moi _trustRejectsNotSlows: bo han ket qua do).")]
     [SerializeField] private float _jumpDegrees = 15f;
     [Tooltip("2 ket qua lien tiep lech nhau duoi muc nay (do, cach nhau < 0.2 s) = xac nhan dong tac that (vd xoay tay nhanh).")]
     [SerializeField] private float _confirmDegrees = 10f;
@@ -45,12 +49,55 @@ public sealed class ImageHandSolver : MonoBehaviour
              "Luc 2 ngon sap cham, diem ngon cai chi 0.2-0.35 (nhin ro: 0.6-1.2).")]
     [SerializeField] private float _confLow = 0.25f;
     [SerializeField] private float _confHigh = 0.6f;
-    [Tooltip("Muc tin toi thieu moi ket qua (de khong dung han khi model mai khong chac).")]
+    [Tooltip("Muc tin toi thieu moi ket qua (de khong dung han khi model mai khong chac). Chi dung o che do cu.")]
     [SerializeField] private float _minTrust = 0.03f;
     [Tooltip("Ket qua tin duoi muc nay KHONG tinh la 'thay tay' (tay o mep khung / bi khuat -> model doan sai, glove_diag 13/10: " +
              "fit 0.03 lien tuc ma w van 1). Chi toan ket qua kem -> giu dang tot cuoi _holdSeconds roi tra ve tay Quest, gate " +
              "cua GloveForceEsp32Output ve 0. Sau khi mat tay, ket qua DAU TIEN phai dat muc nay moi duoc lay. 0 = nhu cu.")]
     [SerializeField] private float _minGoodTrust = 0.1f;
+
+    [Header("Do tre: ket qua kem thi BO, ket qua dat thi bam NHANH (18/10)")]
+    [Tooltip("BAT: muc tin chi dung de LOAI ket qua (duoi _rejectBelow = bo qua), ket qua duoc nhan thi bam voi toc do it nhat " +
+             "_acceptFloor. Co tay chi xet sai so anh + 3 diem long ban tay (co tay, goc ngon cai, goc ngon tro) -- khong bi ngon cai " +
+             "bi khuat keo cham theo.\n\nTAT (cach cu): toc do bam NHAN voi muc tin -> luc 2 ngon sap cham (tin ~0.1) tay ao bo toi " +
+             "cho moi trong ~2 s.")]
+    [SerializeField] private bool _trustRejectsNotSlows = true;
+    [Tooltip("Ket qua (co tay hoac tung ngon) tin duoi muc nay thi bo, khong cap nhat. Bang _minGoodTrust: duoi muc do coi nhu khong thay tay.")]
+    [SerializeField] private float _rejectBelow = 0.1f;
+    [Tooltip("Ket qua duoc nhan bam toi it nhat bang muc nay so voi ket qua tin han (1 = luon bam nhu ket qua tot nhat).")]
+    [Range(0.1f, 1f)]
+    [SerializeField] private float _acceptFloor = 0.6f;
+
+    [Header("Bu do tre bang chuyen dong Quest (THU NGHIEM, mac dinh tat)")]
+    [Tooltip("BAT: vi tri co tay = ket qua anh + doan tay Quest da di ke tu luc CHUP anh do -> bu ca phan tre WiFi + Python. " +
+             "Quest nhin tay deo gang rung chieu sau 4-10 cm, nen chi bat sau khi glove_diag cho thay chuyen dong Quest du muot.")]
+    [SerializeField] private bool _useQuestMotion = false;
+    [Tooltip("Chi lay phan chuyen dong Quest VUONG GOC voi tia nhin camera (bo phan xa/gan -- phan Quest rung nhieu nhat).")]
+    [SerializeField] private bool _questMotionLateralOnly = true;
+    [Tooltip("Doan bu toi da (met) -- chan Quest nhay sai.")]
+    [SerializeField] private float _questMotionMaxMeters = 0.15f;
+
+    [Header("Tay ra khoi khung camera (18/10)")]
+    [Tooltip("BAT: diem Python gui ve nam trong dai mep anh hoac ngoai anh (model DOAN, khong nhin thay) -> trong so 0 khi giai. " +
+             "Ngon con it hon _minFingerPoints diem trong khung -> GIU dang tot cuoi cua ngon do. Ca tay it hon _minInFramePoints " +
+             "diem (hoac mat ca 3 diem long ban tay) -> khong giai, coi nhu khong thay tay.")]
+    [SerializeField] private bool _rejectEdgePoints = true;
+    [Tooltip("Dai mep anh (phan cua chieu rong / cao) coi la 'sat mep, khong tin'.")]
+    [Range(0f, 0.15f)]
+    [SerializeField] private float _edgeMargin = 0.03f;
+    [Tooltip("Ca tay can it nhat bay nhieu diem (tren 9) trong khung moi giai.")]
+    [Range(3, 9)]
+    [SerializeField] private int _minInFramePoints = 5;
+    [Tooltip("Moi ngon (4 diem) can it nhat bay nhieu diem trong khung, khong thi giu dang cu cua ngon do.")]
+    [Range(1, 4)]
+    [SerializeField] private int _minFingerPoints = 2;
+    [Tooltip("BAT: mat tay lau -> chi CO TAY tra ve Quest, ngon cai + tro GIU dang tot cuoi. TAT (cu): ca ngon cung ve tay Quest -- " +
+             "Quest khong nhin duoc ngon deo gang nen ngon ao bi van meo.")]
+    [SerializeField] private bool _keepFingersWhenLost = true;
+    [Tooltip("BAT: ngon cai hoac tro dang bi GIU dang (ra khoi khung) -> ForceWeight ve 0, gate luc cua GloveForceEsp32Output tat " +
+             "luc dan (khong day theo 1 ngon dang dung yen).")]
+    [SerializeField] private bool _cutForceWhenFingerFrozen = true;
+
     [Tooltip("Khi bo giai doi sang cach hieu khac (vd thoat khoi dang ngon gap sai), truot sang dang moi trong khoang nay (giay).")]
     [SerializeField] private float _switchSeconds = 0.3f;
     [Tooltip("Python mat tay: giu tu the cuoi bay lau (giay) roi moi tra ve tay Quest.")]
@@ -79,6 +126,9 @@ public sealed class ImageHandSolver : MonoBehaviour
              "tay deo gang thi uoc luong kich thuoc khong dang tin. Chua thay tay trai lan nao thi giu kich thuoc Quest dat.")]
     [SerializeField] private bool _useLeftHandScale = true;
 
+    // 3 diem long ban tay: co tay (0), goc ngon cai (1), goc ngon tro (5) -- quyet dinh vi tri/huong co tay
+    private static readonly int[] PalmPoints = { 0, 1, 5 };
+
     private FingerUDPReceiver _receiver;
     private GloveLiveStreamer _streamer;
     private Transform _wrist;
@@ -89,6 +139,7 @@ public sealed class ImageHandSolver : MonoBehaviour
 
     private readonly Vector2[] _uv = new Vector2[HandImageFit.Points];
     private readonly float[] _conf = new float[HandImageFit.Points];
+    private readonly float[] _confIn = new float[HandImageFit.Points]; // = _conf, diem sat mep/ngoai anh = 0
     private readonly Vector3[] _dirs = new Vector3[HandImageFit.Points];
     private readonly float[] _w = new float[HandImageFit.Points];
 
@@ -109,6 +160,8 @@ public sealed class ImageHandSolver : MonoBehaviour
     private float _weight;
     private int _seenSwitches;
     private float _slowUntil;
+    private bool _thumbFrozen, _indexFrozen; // ngon ra khoi khung -> giu dang cu
+    private float _forceGate = 1f;
 
     // Ket qua da loc One-Euro (cap nhat moi lan giai xong)
     private Vector3 _fP;
@@ -118,7 +171,8 @@ public sealed class ImageHandSolver : MonoBehaviour
     private readonly float[] _fSpeedA = new float[8];
     private Vector3 _fVel, _fAngVel;           // m/s, truc*do/s
     private readonly float[] _fVelA = new float[8];
-    private float _fTime = -999f;
+    private float _fTime = -999f;              // lan loc gan nhat (moc ngoai suy hien thi)
+    private float _fTimeW, _fTimeT, _fTimeI;    // lan cuoi NHAN ket qua co tay / ngon cai / ngon tro (che do moi)
     private Quaternion _rawPrevR = Quaternion.identity; // ket qua tho lan truoc (de xac nhan cu nhay)
     private float _rawPrevTime = -999f;
     // Tang truot giua (hien thi = 2 tang noi tiep)
@@ -126,6 +180,9 @@ public sealed class ImageHandSolver : MonoBehaviour
     private Quaternion _midR = Quaternion.identity;
     private readonly float[] _midA = new float[8];
     private bool _hasFilter;
+    // Tam tay theo Quest + camera LUC CHUP anh vua giai (bu do tre bang chuyen dong Quest)
+    private Vector3 _solveHintCenter, _solveCamPos;
+    private bool _hasSolveHint;
 
     // --- Chan doan (FingerUDPReceiver ghi vao glove_diag) ---
     public float Weight => _weight;
@@ -143,6 +200,29 @@ public sealed class ImageHandSolver : MonoBehaviour
     public int DorsalUsed => _fit != null ? _fit.DorsalUsed : -1;
     /// <summary>Kich thuoc tay gang ao hien tai (1 = khung xuong chuan, long ban tay ~9.9 cm).</summary>
     public float HandScale => _wrist != null ? _wrist.lossyScale.x : 0f;
+    /// <summary>Tuoi anh vua giai (ms): tu luc chup toi luc ket qua Python ve Unity.</summary>
+    public float FrameAgeMs { get; private set; }
+    /// <summary>Nhu FrameAgeMs nhung tinh tu luc camera PHOI SANG (som hon ca phan camera xu ly). 0 = khong doc duoc.</summary>
+    public float ExposureAgeMs { get; private set; }
+    /// <summary>Co tay giai THO tu anh gan nhat (chua loc, chua ngoai suy) va luc camera phoi sang anh do
+    /// (Time.realtimeSinceStartup, 0 = khong biet) -- "tay that luc chup", de do tre tay ao so voi tay that.</summary>
+    public Vector3 RawWrist { get; private set; }
+    public float RawExposureTime { get; private set; }
+    /// <summary>Co tay dang hien lech ket qua giai moi nhat bao nhieu (mm / do) -- phan tre do bo loc.</summary>
+    public float LagMm { get; private set; }
+    public float LagDeg { get; private set; }
+    /// <summary>Muc tin lan giai gan nhat: co tay, ngon cai, ngon tro (0..1, truoc khi ap nguong nhan/bo).</summary>
+    public float WristTrust { get; private set; }
+    public float ThumbTrust { get; private set; }
+    public float IndexTrust { get; private set; }
+    /// <summary>So diem (tren 9) sat mep / ngoai anh o anh vua nhan.</summary>
+    public int EdgePoints { get; private set; }
+    /// <summary>0 = tay day du trong khung, 1 = mot phan ra ngoai (co diem bi bo / ngon dang giu dang), 2 = khong thay tay (giu dang / ve Quest).</summary>
+    public int State { get; private set; } = 2;
+    /// <summary>Gate luc cho GloveForceEsp32Output: = Weight, ve 0 khi ngon cai/tro dang giu dang (_cutForceWhenFingerFrozen).</summary>
+    public float ForceWeight => _weight * _forceGate;
+    public bool ThumbFrozen => _thumbFrozen;
+    public bool IndexFrozen => _indexFrozen;
 
     private float _initWristScale = 1f;
     private Oculus.Interaction.HandVisual _gloveVisual, _leftVisual;
@@ -185,6 +265,9 @@ public sealed class ImageHandSolver : MonoBehaviour
             _dispFrame = Time.frameCount;
             bool fresh = _fit.HasSolution && (Time.time - _lastGoodTime <= _holdSeconds || holdLonger);
             _weight = Mathf.MoveTowards(_weight, fresh ? 1f : 0f, Time.deltaTime / Mathf.Max(_blendSeconds, 1e-3f));
+            bool frozen = _thumbFrozen || _indexFrozen;
+            _forceGate = _cutForceWhenFingerFrozen && frozen ? 0f : 1f; // GloveForceEsp32Output tu lam muot gate
+            State = !fresh ? 2 : (EdgePoints > 0 || frozen ? 1 : 0);
             if (_fit.HasSolution)
             {
                 if (!_hasFilter) ResetFilter(Time.time);
@@ -210,6 +293,7 @@ public sealed class ImageHandSolver : MonoBehaviour
                     float ahead = Mathf.Clamp(Time.time - _fTime, 0f, _maxExtrapolateSeconds);
                     float aheadR = _extrapolateRotation * ahead;
                     Vector3 tgtP = _fP + _extrapolate * ahead * _fVel;
+                    if (_useQuestMotion && TryQuestMotion(out Vector3 questDelta)) tgtP = _fP + questDelta;
                     Quaternion tgtR = Quaternion.AngleAxis(_fAngVel.magnitude * aheadR, _fAngVel.normalized) * _fR;
                     // 2 tang truot noi tiep: van toc hien thi lien tuc (khong giat theo nhip anh)
                     _midP = Vector3.Lerp(_midP, tgtP, a);
@@ -222,21 +306,39 @@ public sealed class ImageHandSolver : MonoBehaviour
                         _dispA[k] = Mathf.Lerp(_dispA[k], _midA[k], a);
                     }
                 }
+                LagMm = Vector3.Distance(_dispP, _fit.Position) * 1000f;
+                LagDeg = Quaternion.Angle(_dispR, _fit.Rotation);
             }
         }
 
-        // Ghi vao xuong (moi lan goi -- HandVisual co the vua ghi de)
+        // Ghi vao xuong (moi lan goi -- HandVisual co the vua ghi de). Co tay: tron tay anh <-> tay Quest theo _weight.
+        // Ngon: _keepFingersWhenLost -> luon dang tu anh (dang tot cuoi khi mat tay), vi Quest khong nhin duoc ngon deo gang.
         float w = _hasDisp ? _weight : 0f;
-        if (w > 0f)
-        {
+        float wf = _keepFingersWhenLost ? (_hasDisp ? 1f : 0f) : w;
+        if (wf > 0f)
             for (int i = 0; i < _between.Length; i++)
-                _between[i].localRotation = Quaternion.Slerp(_between[i].localRotation, _betweenRest[i], w);
+                _between[i].localRotation = Quaternion.Slerp(_between[i].localRotation, _betweenRest[i], wf);
+        if (w > 0f)
             _wrist.SetPositionAndRotation(Vector3.Lerp(questPos, _dispP, w), Quaternion.Slerp(questRot, _dispR, w));
-        }
         _thumb.SetAngles(_dispA[0], _dispA[1], _dispA[2], _dispA[3]);
         _index.SetAngles(_dispA[4], _dispA[5], _dispA[6], _dispA[7]);
-        _thumb.Apply(w);
-        _index.Apply(w);
+        _thumb.Apply(wf);
+        _index.Apply(wf);
+    }
+
+    /// <summary>Doan tay Quest da di ke tu luc chup anh vua giai (tam tay = goc ngon giua, cung diem lam goi y).</summary>
+    private bool TryQuestMotion(out Vector3 delta)
+    {
+        delta = Vector3.zero;
+        if (!_hasSolveHint || _receiver == null || !_receiver.TryGetRawHandPose(out Vector3 center, out _)) return false;
+        delta = center - _solveHintCenter;
+        if (_questMotionLateralOnly)
+        {
+            Vector3 ray = _solveHintCenter - _solveCamPos;
+            if (ray.sqrMagnitude > 1e-6f) delta = Vector3.ProjectOnPlane(delta, ray.normalized);
+        }
+        delta = Vector3.ClampMagnitude(delta, _questMotionMaxMeters);
+        return true;
     }
 
     /// <summary>Kich thuoc tay gang ao lay tu tay trai tran, roi bao bo giai kich thuoc hien tai (HandVisual dat lai
@@ -277,24 +379,53 @@ public sealed class ImageHandSolver : MonoBehaviour
         _lastRotTime = Time.time;
     }
 
+    private bool InFrame(Vector2 uv) =>
+        uv.x >= _edgeMargin && uv.x <= 1f - _edgeMargin && uv.y >= _edgeMargin && uv.y <= 1f - _edgeMargin;
+
     private void TrySolveNewFrame()
     {
         if (!_receiver.TryGetPixelPoints(out int fid, _uv, _conf, out int dorsal, out Vector2 dorsalUV) || fid == _lastFid) return;
         _lastFid = fid;
         if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
         if (_streamer == null || !_streamer.TryGetFramePose(fid, out Pose cam)) return;
+        if (_streamer.TryGetFrameAge(fid, out float age)) FrameAgeMs = age * 1000f;
 
+        // Diem sat mep / ngoai anh: model doan chu khong nhin thay -> trong so 0, tinh nhu do tin cay 0
+        int inFrame = 0, palmIn = 0, thumbIn = 0, indexIn = 0, edge = 0;
         for (int i = 0; i < HandImageFit.Points; i++)
         {
             if (!_streamer.TryGetFrameRay(fid, _uv[i], out Ray ray)) return;
             _dirs[i] = ray.direction;
-            float c = _conf[i] >= _minConfidence ? 1f : 0f;
+            bool inside = !_rejectEdgePoints || InFrame(_uv[i]);
+            if (inside)
+            {
+                inFrame++;
+                if (i == 0 || i == 1 || i == 5) palmIn++;
+                if (i >= 1 && i <= 4) thumbIn++;
+                else if (i >= 5) indexIn++;
+            }
+            else edge++;
+            _confIn[i] = inside ? _conf[i] : 0f;
+            float c = inside && _conf[i] >= _minConfidence ? 1f : 0f;
             _w[i] = i == 1 ? c * _thumbBaseWeight : c;
         }
+        EdgePoints = edge;
+        if (_rejectEdgePoints && (inFrame < _minInFramePoints || palmIn == 0))
+        {
+            // Qua it diem nhin thay that -> khong giai (giai ra dang tay meo); khong lam moi "lan cuoi thay tay"
+            WristTrust = ThumbTrust = IndexTrust = 0f;
+            return;
+        }
+        _thumbFrozen = _rejectEdgePoints && thumbIn < _minFingerPoints;
+        _indexFrozen = _rejectEdgePoints && indexIn < _minFingerPoints;
 
         // Chieu sau tay theo Quest LUC CHUP (tam tay = goc ngon giua), trung binh theo thoi gian
+        _hasSolveHint = false;
         if (_streamer.TryGetFrameHint(fid, out Vector3 center, out _))
         {
+            _solveHintCenter = center;
+            _solveCamPos = cam.position;
+            _hasSolveHint = true;
             float z = Vector3.Dot(center - cam.position, cam.rotation * Vector3.forward);
             if (z > 0.08f && z < 1.2f)
             {
@@ -323,22 +454,36 @@ public sealed class ImageHandSolver : MonoBehaviour
                              warm, dorsal, dorsalDir);
         SolveMs = (float)sw.Elapsed.TotalMilliseconds;
         if (!ok) return;
+        // Moc "tay that luc chup": ket qua tho + luc phoi sang (ghi ca khi bo loc bo ket qua nay)
+        RawWrist = _fit.Position;
+        if (_streamer.TryGetFrameExposureTime(fid, out float exposure))
+        {
+            RawExposureTime = exposure;
+            ExposureAgeMs = (Time.realtimeSinceStartup - exposure) * 1000f;
+        }
+        else RawExposureTime = ExposureAgeMs = 0f;
         if (!_hasFilter || Time.time - _lastGoodTime > _holdSeconds)
         {
             // Bat dau lai (lan dau / sau khi mat tay): chi lay ket qua TOT, khong thi tay giu nguyen dang dang hien
             LastTrust = ResultTrust();
+            WristTrust = LastTrust;
             if (LastTrust < _minGoodTrust) return;
             ResetFilter(Time.time, _hasFilter);
         }
+        else if (_trustRejectsNotSlows) FilterStepGated(Time.time);
         else FilterStep(Time.time);
         if (LastTrust >= _minGoodTrust) _lastGoodTime = Time.time;
         SolvedFrameId = fid;
     }
 
+    /// <summary>Muc tin theo sai so anh (1 = tot, 0 = qua kem).</summary>
+    private float ErrTrust() => Mathf.Clamp01((_errBad - _fit.ImageError) / Mathf.Max(_errBad - _errGood, 1e-4f));
+
     /// <summary>Do tin ket qua vua giai theo sai so anh + do tin cay diem (nhu FilterStep, khong co phan chong nhay huong).</summary>
     private float ResultTrust()
     {
-        float w = Mathf.Clamp01((_errBad - _fit.ImageError) / Mathf.Max(_errBad - _errGood, 1e-4f));
+        float w = ErrTrust();
+        if (_trustRejectsNotSlows) return w * Mathf.Max(PalmConfTrust(), 0.3f);
         return Mathf.Max(w * Mathf.Max(ConfTrust(0, 8), 0.3f), _minTrust);
     }
 
@@ -351,7 +496,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         _fR = _fit.Rotation;
         if (keepUnsureFingers)
         {
-            float wT = ConfTrust(1, 4), wI = ConfTrust(5, 8);
+            float wT = _thumbFrozen ? 0f : ConfTrust(1, 4), wI = _indexFrozen ? 0f : ConfTrust(5, 8);
             for (int k = 0; k < 8; k++) _fA[k] = Mathf.Lerp(_fA[k], _fit.Angles[k], k < 4 ? wT : wI);
         }
         else System.Array.Copy(_fit.Angles, _fA, 8);
@@ -361,12 +506,13 @@ public sealed class ImageHandSolver : MonoBehaviour
         System.Array.Clear(_fSpeedA, 0, 8);
         _fVel = _fAngVel = Vector3.zero;
         System.Array.Clear(_fVelA, 0, 8);
-        _fTime = now;
+        _fTime = _fTimeW = _fTimeT = _fTimeI = now;
         _hasFilter = true;
     }
 
     /// <summary>Loc One-Euro 1 buoc cho lan giai moi: tan so cat = _minCutoff + beta * toc do (da lam muot),
-    /// nen tay dung yen thi loc manh (it rung), tay chay thi gan nhu theo ngay (it tre).</summary>
+    /// nen tay dung yen thi loc manh (it rung), tay chay thi gan nhu theo ngay (it tre).
+    /// Che do CU: toc do bam nhan voi muc tin (xem _trustRejectsNotSlows).</summary>
     private void FilterStep(float now)
     {
         float te = Mathf.Max(now - _fTime, 1e-3f);
@@ -375,16 +521,19 @@ public sealed class ImageHandSolver : MonoBehaviour
         Quaternion r = _fit.Rotation;
 
         // Do tin cay ket qua nay: sai so anh, nhay huong dot ngot khong duoc xac nhan, do tin cay diem cua model.
-        float w = Mathf.Clamp01((_errBad - _fit.ImageError) / Mathf.Max(_errBad - _errGood, 1e-4f));
+        float w = ErrTrust();
         bool confirmed = Quaternion.Angle(r, _rawPrevR) < _confirmDegrees && now - _rawPrevTime < 0.2f;
         if (Quaternion.Angle(r, _fR) > _jumpDegrees && !confirmed) w *= 0.2f;
         float wFingers = w;
         w *= Mathf.Max(ConfTrust(0, 8), 0.3f);
-        float wT = Mathf.Max(wFingers * ConfTrust(1, 4), _minTrust), wI = Mathf.Max(wFingers * ConfTrust(5, 8), _minTrust);
+        float wT = _thumbFrozen ? 0f : Mathf.Max(wFingers * ConfTrust(1, 4), _minTrust);
+        float wI = _indexFrozen ? 0f : Mathf.Max(wFingers * ConfTrust(5, 8), _minTrust);
         w = Mathf.Max(w, _minTrust);
         _rawPrevR = r;
         _rawPrevTime = now;
-        LastTrust = w;
+        LastTrust = WristTrust = w;
+        ThumbTrust = wT;
+        IndexTrust = wI;
 
         _fSpeedP = Mathf.Lerp(_fSpeedP, Vector3.Distance(p, _fP) / te, ad * w);
         _fSpeedR = Mathf.Lerp(_fSpeedR, Quaternion.Angle(r, _fR) / te, ad * w);
@@ -392,29 +541,113 @@ public sealed class ImageHandSolver : MonoBehaviour
         _fVel = Vector3.Lerp(_fVel, (newP - _fP) / te, 0.5f * w);
         _fP = newP;
         Quaternion newR = Quaternion.Slerp(_fR, r, OneEuroAlpha(te, _minCutoff + _betaRotation * _fSpeedR) * w);
-        (newR * Quaternion.Inverse(_fR)).ToAngleAxis(out float dAng, out Vector3 axis);
-        if (dAng > 180f) dAng -= 360f;
-        Vector3 angVel = float.IsFinite(axis.x) ? axis * (dAng / te) : Vector3.zero;
-        _fAngVel = Vector3.Lerp(_fAngVel, angVel, 0.5f * w);
+        _fAngVel = Vector3.Lerp(_fAngVel, AngularVelocity(_fR, newR, te), 0.5f * w);
         _fR = newR;
         for (int k = 0; k < 8; k++)
         {
             float x = _fit.Angles[k], wk = k < 4 ? wT : wI;
+            if (wk <= 0f) { _fVelA[k] = 0f; continue; } // ngon dang giu dang
             _fSpeedA[k] = Mathf.Lerp(_fSpeedA[k], Mathf.Abs(x - _fA[k]) / te, ad * wk);
             float newA = Mathf.Lerp(_fA[k], x, OneEuroAlpha(te, _minCutoff + _betaAngle * _fSpeedA[k]) * wk);
             _fVelA[k] = Mathf.Lerp(_fVelA[k], (newA - _fA[k]) / te, 0.5f * wk);
             _fA[k] = newA;
         }
+        _fTime = _fTimeW = _fTimeT = _fTimeI = now;
+    }
+
+    /// <summary>Loc One-Euro, che do MOI: muc tin chi dung de NHAN / BO ket qua. Co tay, ngon cai, ngon tro xet rieng:
+    /// tin duoi _rejectBelow (hoac co tay nhay huong khong duoc xac nhan, ngon dang giu dang) -> giu nguyen, van toc 0;
+    /// duoc nhan -> bam voi toc do One-Euro nhan max(muc tin, _acceptFloor). Thoi gian te tinh tu lan NHAN gan nhat
+    /// cua tung phan, nen sau vai ket qua bi bo, ket qua tot dau tien keo tay ve dung cho ngay.</summary>
+    private void FilterStepGated(float now)
+    {
+        Vector3 p = _fit.Position;
+        Quaternion r = _fit.Rotation;
+        float err = ErrTrust();
+        bool confirmed = Quaternion.Angle(r, _rawPrevR) < _confirmDegrees && now - _rawPrevTime < 0.2f;
+        bool jump = Quaternion.Angle(r, _fR) > _jumpDegrees && !confirmed;
+        _rawPrevR = r;
+        _rawPrevTime = now;
+
+        float wristTrust = err * Mathf.Max(PalmConfTrust(), 0.3f);
+        float tT = _thumbFrozen ? 0f : err * ConfTrust(1, 4);
+        float tI = _indexFrozen ? 0f : err * ConfTrust(5, 8);
+        LastTrust = WristTrust = wristTrust; // "thay tay" xet truoc luat nhay huong (nhu che do cu)
+        ThumbTrust = tT;
+        IndexTrust = tI;
+
+        float aW = jump ? 0f : Accept(wristTrust);
+        if (aW > 0f)
+        {
+            float te = Mathf.Max(now - _fTimeW, 1e-3f);
+            float ad = OneEuroAlpha(te, _speedCutoff);
+            _fSpeedP = Mathf.Lerp(_fSpeedP, Vector3.Distance(p, _fP) / te, ad);
+            _fSpeedR = Mathf.Lerp(_fSpeedR, Quaternion.Angle(r, _fR) / te, ad);
+            Vector3 newP = Vector3.Lerp(_fP, p, OneEuroAlpha(te, _minCutoff + _betaPosition * _fSpeedP) * aW);
+            _fVel = Vector3.Lerp(_fVel, (newP - _fP) / te, 0.5f);
+            _fP = newP;
+            Quaternion newR = Quaternion.Slerp(_fR, r, OneEuroAlpha(te, _minCutoff + _betaRotation * _fSpeedR) * aW);
+            _fAngVel = Vector3.Lerp(_fAngVel, AngularVelocity(_fR, newR, te), 0.5f);
+            _fR = newR;
+            _fTimeW = now;
+        }
+        else _fVel = _fAngVel = Vector3.zero; // khong ngoai suy theo van toc cu khi dang bo ket qua
+
+        FilterFingerGated(0, Accept(tT), ref _fTimeT, now);
+        FilterFingerGated(4, Accept(tI), ref _fTimeI, now);
         _fTime = now;
     }
 
-    /// <summary>Do tin cay (0..1) theo trung binh do tin cay cac diem anh [from..to] cua ket qua vua giai (model Python).</summary>
+    /// <summary>4 goc 1 ngon (bat dau tu first) theo luat nhan / bo cua FilterStepGated.</summary>
+    private void FilterFingerGated(int first, float accept, ref float lastTime, float now)
+    {
+        if (accept <= 0f)
+        {
+            for (int k = first; k < first + 4; k++) _fVelA[k] = 0f;
+            return;
+        }
+        float te = Mathf.Max(now - lastTime, 1e-3f);
+        float ad = OneEuroAlpha(te, _speedCutoff);
+        for (int k = first; k < first + 4; k++)
+        {
+            float x = _fit.Angles[k];
+            _fSpeedA[k] = Mathf.Lerp(_fSpeedA[k], Mathf.Abs(x - _fA[k]) / te, ad);
+            float newA = Mathf.Lerp(_fA[k], x, OneEuroAlpha(te, _minCutoff + _betaAngle * _fSpeedA[k]) * accept);
+            _fVelA[k] = Mathf.Lerp(_fVelA[k], (newA - _fA[k]) / te, 0.5f);
+            _fA[k] = newA;
+        }
+        lastTime = now;
+    }
+
+    /// <summary>Muc tin -> he so bam: duoi _rejectBelow = 0 (bo), con lai it nhat _acceptFloor.</summary>
+    private float Accept(float trust) => trust >= _rejectBelow ? Mathf.Max(trust, _acceptFloor) : 0f;
+
+    private static Vector3 AngularVelocity(Quaternion from, Quaternion to, float te)
+    {
+        (to * Quaternion.Inverse(from)).ToAngleAxis(out float dAng, out Vector3 axis);
+        if (dAng > 180f) dAng -= 360f;
+        return float.IsFinite(axis.x) ? axis * (dAng / te) : Vector3.zero;
+    }
+
+    /// <summary>Do tin cay (0..1) theo trung binh do tin cay cac diem anh [from..to] cua ket qua vua giai (model Python).
+    /// Diem sat mep / ngoai anh tinh la 0 (_rejectEdgePoints).</summary>
     private float ConfTrust(int from, int to)
     {
         float sum = 0f;
-        for (int i = from; i <= to; i++) sum += _conf[i];
-        return Mathf.Clamp01((sum / (to - from + 1) - _confLow) / Mathf.Max(_confHigh - _confLow, 1e-4f));
+        for (int i = from; i <= to; i++) sum += _confIn[i];
+        return ConfToTrust(sum / (to - from + 1));
     }
+
+    /// <summary>Do tin cay 3 diem long ban tay (co tay, goc ngon cai, goc ngon tro) -- quyet dinh co tay.</summary>
+    private float PalmConfTrust()
+    {
+        float sum = 0f;
+        foreach (int i in PalmPoints) sum += _confIn[i];
+        return ConfToTrust(sum / PalmPoints.Length);
+    }
+
+    private float ConfToTrust(float meanConf) =>
+        Mathf.Clamp01((meanConf - _confLow) / Mathf.Max(_confHigh - _confLow, 1e-4f));
 
     private static float OneEuroAlpha(float te, float cutoff)
     {
