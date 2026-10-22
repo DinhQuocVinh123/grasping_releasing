@@ -90,7 +90,7 @@ Assets/_Recovery.meta
 # Log thí nghiệm lấy từ kính về (cùng loại với GraspLog_pulled.csv ở trên)
 GraspLog_*.csv
 events_*.csv
-# Log lực đọc từ kính bằng tools/watch_glove_force.py
+# Log lực đọc từ kính bằng tools/analysis/watch_glove_force.py
 glove_force_*.csv
 
 # ===== Phần Python =====

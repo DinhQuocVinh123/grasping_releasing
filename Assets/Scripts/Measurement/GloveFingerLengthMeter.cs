@@ -16,7 +16,7 @@ using UnityEngine;
 ///      the distance between neighbouring points = segment length. Only frames with all 9 points clear, away from
 ///      the image edge, and the finger STRAIGHT are used (a tilted or bent finger looks shorter).
 ///   5. The 90th percentile (p90) over the accepted frames is shown in the headset and written to
-///      Application.persistentDataPath/glove_finger_lengths_*.csv (summarised by tools/glove_finger_lengths.py).
+///      Application.persistentDataPath/glove_finger_lengths_*.csv (summarised by tools/analysis/glove_finger_lengths.py).
 ///      p90 because a tilted finger only ever looks SHORTER in the image, never longer.
 ///      Only the TOTAL (knuckle -> tip) is reliable: the glove hides the middle joints, so the split between
 ///      segments follows how the training images were labelled.

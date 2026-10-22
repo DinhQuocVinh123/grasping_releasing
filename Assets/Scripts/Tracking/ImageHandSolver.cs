@@ -11,14 +11,14 @@ using UnityEngine;
 ///
 /// Smoothing, per image result: a One Euro filter (strong when the hand is still, light when it moves), then two
 /// display smoothing stages per rendered frame, plus extrapolation along the filtered velocity to make up for their lag.
-/// _betaPosition 200 and _displaySeconds 0.015 were chosen with tools/filter_sim.py on recorded logs: lower latency
+/// _betaPosition 200 and _displaySeconds 0.015 were chosen with tools/analysis/filter_sim.py on recorded logs: lower latency
 /// with no visible jitter.
 /// </summary>
 public sealed class ImageHandSolver : MonoBehaviour
 {
     [Tooltip("Time constant (s) of EACH of the two chained display smoothing stages, from the filtered result to the rendered frame, so the hand " +
              "moves EVENLY between images (~18 images/s) and hides what the One Euro filter lets through. 0.015 s: about 18 ms less latency " +
-             "than 0.02 with jitter while moving 0.45 -> 0.69 mm (tools/filter_sim.py); 0.01 saves 26 ms but jitters 2.5x more.")]
+             "than 0.02 with jitter while moving 0.45 -> 0.69 mm (tools/analysis/filter_sim.py); 0.01 saves 26 ms but jitters 2.5x more.")]
     [SerializeField] private float _displaySeconds = 0.015f;
     [Header("One Euro filter (per solve): hand still -> strong smoothing, hand moving -> follows quickly")]
     [Tooltip("Cutoff frequency with the hand still (Hz). Lower = smoother but more lag.")]

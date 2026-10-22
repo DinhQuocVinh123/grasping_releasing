@@ -399,10 +399,10 @@ public class FingerUDPReceiver : MonoBehaviour
             head.Append(",age_ms,lag_mm,lag_deg,wtrust,ttrust,itrust,edgepts,hstate,fweight,tfrozen,ifrozen");
             // Virtual vs real hand latency: shared clock realtimeSinceStartup for this row (rt), image age since exposure,
             // camera -> Unity, and the RAW solved wrist of the latest image with that image's exposure time (sexp; 0 = unknown).
-            // tools/latency_diag.py compares (rt, wx..wz) with (sexp, sx..sz) to find the latency.
+            // tools/analysis/latency_diag.py compares (rt, wx..wz) with (sexp, sx..sz) to find the latency.
             head.Append(",rt,exp_age_ms,cam_ms,sexp,sx,sy,sz");
             // RAW Quest wrist (before GloveWristStabilizer), to test whether the Quest could compensate latency: world position,
-            // whether the Quest tracked the hand this frame, high confidence, receive time (realtime). Read by tools/quest_raw_feasibility.py.
+            // whether the Quest tracked the hand this frame, high confidence, receive time (realtime). Read by tools/analysis/quest_raw_feasibility.py.
             head.Append(",qrx,qry,qrz,qvalid,qconf,qrt");
             _diag.WriteLine(head.ToString());
             Debug.Log($"[FingerUDPReceiver] Writing diagnostics to {path}", this);

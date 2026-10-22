@@ -1,20 +1,20 @@
-"""Chia do tre tay gang ra tung khau, tu 1 file glove_latency_*.csv (ban build tu 20/10, bat Log Diagnostics tren
-FingerUDPReceiver; can run_glove_quest_stream.py ban 20/10 gui kem "tm:").
+"""Splits the glove hand's latency into stages, from one glove_latency_*.csv file (turn on Log Diagnostics on
+FingerUDPReceiver; needs a run_glove_quest_stream.py that sends the "tm:" field).
 
-Moi dong = 1 anh co ket qua. Tren kinh (dong ho Quest): phoi sang -> xin anh (cam) -> GPU tra anh (rb) -> cho luong phu
-(wq) -> nen JPEG (enc) -> ghi vao socket (send) -> ket qua ve toi kinh (rtt) -> tay ao lay ket qua (pick).
-Ben may tinh (dong ho PC, chi dung khoang thoi gian): du anh -> gui ket qua (py_pc = giai nen + model + phan con lai).
+One row = one image with a result. On the headset (Quest clock): exposure -> image requested (cam) -> GPU returns the image (rb)
+-> wait for the worker thread (wq) -> JPEG encode (enc) -> write to the socket (send) -> result back on the headset (rtt) -> taken
+by the virtual hand (pick). On the PC (PC clock, durations only): image complete -> result sent (py_pc = decode + model + the rest).
 
-rtt - py_pc = WiFi di + WiFi ve + thoi gian anh XEP HANG cho Python ranh. KHONG tach 2 phan bang anh Python phai cho
-(py_blocked = 1): buoi 20/10 11:11 chi 6% anh nhu vay, va gan het roi vao luc mo app / luc WiFi khung -> WiFi ra 149 ms
-(sai, tong cac khau 304 ms > tong do thang 208 ms). Thay vao do: Python lay anh MOI NHAT, nen anh do da nam cho trung
-binh ~ nua khoang cach 2 anh kinh gui (khi Python cham hon kinh) -> phan con lai la WiFi (uoc luong).
+rtt - py_pc = Wi-Fi out + Wi-Fi back + the time the image QUEUED waiting for Python. The two parts are NOT separated using the images
+Python had to wait for (py_blocked = 1): only ~6% of images, almost all at app start / during Wi-Fi hiccups, which gave a wrong Wi-Fi
+time (the stages summed to 304 ms against 208 ms measured directly). Instead: Python takes the NEWEST image, so that image waited on
+average about half the interval between two headset sends (when Python is slower than the headset) -> the rest is Wi-Fi (estimate).
 
-Chua gom: bo loc lam muot sau khi tay ao lay ket qua + 1 khung ve len man hinh -- xem tools/latency_diag.py
-(do tre tay ao tong) tren file glove_diag cung buoi.
+Not included: the smoothing filter after the virtual hand takes the result + 1 frame to draw it -- see tools/analysis/latency_diag.py
+(total virtual-hand latency) on the glove_diag file of the same session. The printed report is in Vietnamese.
 
-Cach dung:
-  python tools/latency_breakdown.py glove_latency_20261020_xxxxxx.csv
+Usage:
+  python tools/analysis/latency_breakdown.py glove_latency_20261020_xxxxxx.csv
 """
 import csv
 import statistics
@@ -33,7 +33,7 @@ def main(path):
             try:
                 rows.append({k: float(v) for k, v in r.items() if v not in ("", None)})
             except ValueError:
-                continue  # dong cuoi bi cat khi tat app
+                continue  # last line cut off when the app was closed
     rows = [r for r in rows if r.get("py_pc_ms", -1) >= 0 and r.get("rtt_ms", -1) >= 0 and r.get("rb_ms", -1) >= 0]
     if len(rows) < 30:
         sys.exit(f"Chi co {len(rows)} anh du so lieu -- can Python ban 20/10 (gui 'tm:') va tay trong khung camera.")

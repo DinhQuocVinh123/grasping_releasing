@@ -1,19 +1,23 @@
-"""Thu kha thi bu tre bang Quest: bo theo doi tay san co cua Quest (nhin tay DEO GANG) tre va rung bao nhieu so voi tay
-that, tu 1 file glove_diag_*.csv co cot qrx..qrt (ban build tu 20/10, bat Log Diagnostics tren FingerUDPReceiver).
+"""Feasibility test for latency compensation with the Quest: how late and how jittery is the Quest's own hand tracking (looking
+at the GLOVED hand) compared with the real hand, from one glove_diag_*.csv file with the qrx..qrt columns (turn on Log Diagnostics
+on FingerUDPReceiver).
 
-Tay that = co tay giai THO tu anh camera, gan voi luc camera PHOI SANG anh do (sexp, sx..sz) -- nhu latency_diag.py.
-Quest tho = co tay Quest TRUOC GloveWristStabilizer (qrx..qrz, luc nhan qrt). De so, so sanh them co tay Quest SAU bo loc
-(rwx..rwz) -- cung la cot ma lan thu 19/10 da dung.
+Real hand = the RAW wrist solved from the camera image, stamped with the time the camera EXPOSED that image (sexp, sx..sz) -- like
+latency_diag.py. Raw Quest = the Quest wrist BEFORE GloveWristStabilizer (qrx..qrz, received at qrt). For reference, the Quest wrist
+AFTER the filter (rwx..rwz) is compared too.
 
-Do tre: tim do lech thoi gian lam VAN TOC Quest khop nhat voi van toc tay that (dung van toc nen lech vi tri co dinh cua
-Quest -- vai cm khi deo gang -- khong anh huong). Do khop r = he so tuong quan van toc tai do tre do. Tach 2 phan: NGANG
-(vuong goc huong nhin) va SAU (doc huong nhin) -- Quest nhin tay deo gang rung chieu sau nhieu nhat.
+Latency: the time shift that makes the Quest VELOCITY match the real-hand velocity best (velocities, so the Quest's constant position
+offset -- a few cm with the glove -- does not matter). Match r = velocity correlation at that shift. Split into LATERAL (perpendicular
+to the view direction) and DEPTH (along the view direction) -- the Quest's depth for the gloved hand jitters the most.
 
-Luat quyet dinh (dat TRUOC khi xem so lieu, Niche_Latency_Compensation_Literature.md muc 6):
-  LAM TIEP niche neu Quest tho tre <= 100 ms VA van toc ngang khop r >= 0.7; khong thi CHUYEN HUONG.
+Decision rule (set BEFORE looking at the data):
+  CONTINUE if the raw Quest lags <= 100 ms AND the lateral velocity match r >= 0.7; otherwise CHANGE DIRECTION.
+  (Result of the first test: 115 ms, r = 0.27 -> change direction.)
 
-Cach dung:
-  python tools/quest_raw_feasibility.py glove_diag_20261020_xxxxxx.csv
+The printed report is in Vietnamese.
+
+Usage:
+  python tools/analysis/quest_raw_feasibility.py glove_diag_20261020_xxxxxx.csv
 """
 import bisect
 import csv
@@ -37,7 +41,7 @@ def load(path):
 
 
 def rotate_forward(qx, qy, qz, qw):
-    """Huong nhin (truc +Z cua dau) tu quaternion Unity."""
+    """View direction (the head's +Z axis) from a Unity quaternion."""
     return (2 * (qx * qz + qw * qy), 2 * (qy * qz - qw * qx), 1 - 2 * (qx * qx + qy * qy))
 
 
@@ -46,7 +50,7 @@ def main(path):
     t0 = float(rows[0]["rt"])
     dur = float(rows[-1]["rt"]) - t0
 
-    # Tay that theo luc phoi sang
+    # Real hand by exposure time
     truth = {}
     for r in rows:
         e = float(r["sexp"])
@@ -57,7 +61,7 @@ def main(path):
     if len(tt) < 50:
         sys.exit("Qua it anh co luc phoi sang de do.")
 
-    # Huong nhin theo thoi gian dong (de tach ngang / sau)
+    # View direction over time (to split lateral / depth)
     view_t = [float(r["rt"]) for r in rows]
     view_f = [rotate_forward(float(r["vqx"]), float(r["vqy"]), float(r["vqz"]), float(r["vqw"])) for r in rows]
 
@@ -65,14 +69,14 @@ def main(path):
         i = min(max(bisect.bisect_left(view_t, t), 0), len(view_t) - 1)
         return view_f[i]
 
-    # Quest tho: moi lan cap nhat 1 mau (qrt doi), chi khi dang theo doi
+    # Raw Quest: one sample per update (qrt changes), only while tracking
     raw, last_t = [], None
     for r in rows:
         qt = float(r["qrt"])
         if r["qvalid"] == "1" and qt > 0 and qt != last_t:
             raw.append((qt, (float(r["qrx"]), float(r["qry"]), float(r["qrz"]))))
             last_t = qt
-    # Quest sau bo loc (cot cu): moi khi gia tri doi
+    # Quest after the filter (older columns): whenever the value changes
     filt, last_p = [], None
     for r in rows:
         p = (float(r["rwx"]), float(r["rwy"]), float(r["rwz"]))
@@ -88,7 +92,7 @@ def main(path):
           f"mat dau > 0.3 s: {len(long_gaps)} lan (tong {sum(long_gaps):.1f} s)")
 
     def truth_vel(t):
-        """Van toc tay that luc t (sai phan trung tam +-20 ms tren duong noi suy), None neu thieu anh hoac tay dung yen."""
+        """Real-hand velocity at time t (central difference +-20 ms on the interpolated path), None if images are missing or the hand is still."""
         def at(x):
             i = bisect.bisect_right(tt, x)
             if i == 0 or i >= len(tt) or tt[i] - tt[i - 1] > MAX_GAP_S:

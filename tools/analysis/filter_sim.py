@@ -1,15 +1,16 @@
-"""Mo phong bo loc co tay cua ImageHandSolver (One-Euro co nhan/bo theo muc tin + 2 tang truot muot + ngoai suy) tren
-ket qua giai THO trong 1 file glove_diag_*.csv, de thu thong so ma khong can deo kinh.
+"""Simulates ImageHandSolver's wrist filter (One Euro with accept/reject by trust + 2 display smoothing stages + extrapolation)
+on the RAW solve results in one glove_diag_*.csv file, to try settings without wearing the headset.
 
-  1. Chay bo loc voi thong so HIEN TAI va so voi co tay dang hien trong log (wx..wz) -> mo phong co dung khong.
-  2. Thu nhieu bo thong so: DO TRE (luc tay chay, so voi tay that luc phoi sang -- nhu latency_diag.py) va DO RUNG
-     (luc tay dung yen: lech RMS so voi trung binh truot 0.3 s cua chinh tay hien).
+  1. Runs the filter with the CURRENT settings and compares with the wrist shown in the log (wx..wz) -> is the simulation right?
+  2. Tries several settings: LATENCY (while the hand moves, against the real hand at exposure time -- like latency_diag.py) and
+     JITTER (while the hand is still: RMS offset from the 0.3 s moving average of the shown hand itself).
 
-Chi mo phong VI TRI co tay. Bo qua: luat nhay huong (xoay), luc doi cach giai (_switchSeconds), tron voi tay Quest.
-Ngon tay dung chung _minCutoff (beta rieng) -- doi _minCutoff la doi ca ngon.
+Only the wrist POSITION is simulated. Ignored: the rotation-jump rule, interpretation switches (_switchSeconds), blending with the
+Quest hand. The fingers share _minCutoff (with their own beta) -- changing _minCutoff changes the fingers too.
+The printed report is in Vietnamese.
 
-Cach dung:
-  python tools/filter_sim.py glove_diag_20261020_xxxxxx.csv
+Usage:
+  python tools/analysis/filter_sim.py glove_diag_20261020_xxxxxx.csv
 """
 import bisect
 import csv
@@ -49,13 +50,13 @@ def load(path):
 
 
 def simulate(rows, p):
-    """Tra ve vi tri hien moi dong (None truoc lan giai dau)."""
+    """Returns the shown position for every row (None before the first solve)."""
     fP = mid = disp = None
     speed, vel, t_w, t_f = 0.0, (0.0, 0.0, 0.0), 0.0, 0.0
     last_exp, prev_t, out = 0.0, None, []
     for r in rows:
         now = r["t"]
-        if r["sexp"] > 0 and r["sexp"] != last_exp:  # ket qua giai moi trong khung nay
+        if r["sexp"] > 0 and r["sexp"] != last_exp:  # a new solve result in this frame
             last_exp = r["sexp"]
             x = r["raw"]
             if fP is None:
@@ -105,8 +106,8 @@ def make_truth_at(tt, tp):
 
 
 def jerk(rows, shown, truth_at):
-    """GIAT khi tay chay: RMS sai phan bac 2 cua vi tri hien giua 3 khung lien tiep (mm) -- chuyen dong deu = 0, nhay theo
-    nhip anh (18/s) = lon. Truot muot qua nhanh tung lam tay giat khi nhac vat (ghi chu _displaySeconds, 03/10)."""
+    """JERK while the hand moves: RMS second difference of the shown position over 3 consecutive frames (mm) -- smooth motion = 0,
+    stepping at the image rate (18/s) = large. Too-fast display smoothing once made the hand jerk when lifting objects (see _displaySeconds)."""
     acc = []
     for i in range(1, len(rows) - 1):
         a, b, c = shown[i - 1], shown[i], shown[i + 1]
@@ -120,7 +121,7 @@ def jerk(rows, shown, truth_at):
 
 
 def evaluate(rows, shown, truth_at):
-    """(do tre ms, sai lech mm o do tre do, rung luc dung yen mm RMS)."""
+    """(latency ms, offset mm at that latency, still-hand jitter mm RMS)."""
     samples = [(r["rt"], s) for r, s in zip(rows, shown) if s is not None and r["hstate"] == 0]
     moving = []
     for rt, s in samples:
@@ -165,8 +166,8 @@ def main(path):
     print(f"  Tay hien THAT trong log: tre {real[0]:.0f} ms (lech {real[1]:.1f} mm), rung dung yen {real[2]:.2f} mm RMS "
           f"({real[3]} khung), giat khi chay {jerk(rows, shown_real, truth_at):.2f} mm")
 
-    # minCutoff va san nhan (accept_floor) gan nhu khong doi gi (20/10 12:17) -> chi thu beta + truot muot hien thi
-    # Hien tai = sau buoc C (20/10 12:40); truoc do beta 80, hien 0.02
+    # minCutoff and accept_floor barely change anything -> only try beta + display smoothing
+    # Current = after the filter tuning; before it beta was 80 and display 0.02
     variants = [("hien tai (beta 200, hien 0.015)", {})]
     for beta in (80, 150, 200, 300):
         for disp in (0.02, 0.015, 0.01, 0.005):

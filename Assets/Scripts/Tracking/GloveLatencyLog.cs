@@ -3,7 +3,7 @@ using UnityEngine;
 
 /// <summary>
 /// Per-stage latency log of the glove hand: one row of glove_latency_*.csv per image result
-/// (Application.persistentDataPath), read by tools/latency_breakdown.py.
+/// (Application.persistentDataPath), read by tools/analysis/latency_breakdown.py.
 ///
 /// Used by FingerUDPReceiver when its _logDiagnostics is on:
 ///   - OnPacket (receive thread): a result packet arrived, with Python's per-stage times ("tm:" field);

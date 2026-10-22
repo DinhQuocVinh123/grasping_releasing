@@ -27,8 +27,8 @@ _logCsv in the Inspector instead (writes glove_esp32_cmd_*.csv on the Quest).
 Needs the Quest on USB (`adb devices` lists it) and the app running. Only reads logcat, so it
 runs fine next to glove_serial_bridge.py.
 
-    python tools/watch_glove_force.py
-    python tools/watch_glove_force.py --csv my_test.csv
+    python tools/analysis/watch_glove_force.py
+    python tools/analysis/watch_glove_force.py --csv my_test.csv
 """
 import argparse
 import csv

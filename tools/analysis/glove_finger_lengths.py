@@ -1,13 +1,14 @@
-"""Tom tat chieu dai ngon cai + ngon tro do KHI DEO GANG, tu 1 file glove_finger_lengths_*.csv
-(Assets/Scripts/GloveFingerLengthMeter.cs: 9 diem model gang + khoang cach tay theo Quest).
+"""Summarises the thumb and index lengths measured WITH THE GLOVE ON, from one glove_finger_lengths_*.csv file
+(Assets/Scripts/Measurement/GloveFingerLengthMeter.cs: the glove model's 9 points + the hand distance from the Quest).
 
-In: so anh dat (ngon duoi thang), trung vi + khoang p25-p75 tung dot, nua dau / nua sau buoi do, va lech so voi thuoc
-neu co. Cot r(kc): tuong quan chieu dai tung anh voi khoang cach tay dung de tinh. Chieu dai TI LE THUAN voi khoang cach
-do, nen r cao = nhieu khoang cach Quest la nguon nhieu chinh (lay trung vi nhieu anh de giam). r KHONG cho biet lech
-co he thong -- cai do chi biet khi so voi thuoc (--ruler).
+Prints: number of accepted frames (finger straight), p90 (the reported length -- a tilted finger only looks shorter), median +
+p25-p75 per segment, first / second half of the session, and the difference from a ruler if given. Column r(kc): correlation of each
+frame's length with the hand distance used. The length is PROPORTIONAL to that distance, so a high r means the Quest distance noise is
+the main noise source (averaging many frames reduces it). r does NOT reveal a systematic bias -- only a ruler comparison (--ruler) does.
+Column names: cai = thumb, tro = index, dau = tip, dot = segment. The printed report is in Vietnamese.
 
-Cach dung:
-  python tools/glove_finger_lengths.py glove_finger_lengths_20261021_xxxxxx.csv [--ruler tro_MCP-dau=80 cai_MCP-dau=60 ...]
+Usage:
+  python tools/analysis/glove_finger_lengths.py glove_finger_lengths_20261021_xxxxxx.csv [--ruler tro_MCP-dau=90 cai_MCP-dau=60 ...]
 """
 import argparse
 import csv
@@ -43,7 +44,7 @@ def main():
             try:
                 rows.append({k: float(v) for k, v in r.items()})
             except (TypeError, ValueError):
-                continue  # dong cuoi bi cat khi tat app
+                continue  # last line cut off when the app was closed
     if not rows:
         raise SystemExit("File khong co dong nao.")
     dur = rows[-1]["t"] - rows[0]["t"]
@@ -57,8 +58,8 @@ def main():
             print("  qua it anh -- giu ngon duoi thang, mat ngon quay ve camera")
             continue
         half = len(ok) // 2
-        # p90 = chieu dai bao cao: ngon nghieng chi lam NGAN tren anh, anh dai nhat gan that nhat (21/10: ngon tro p90
-        # 90.4 mm, thuoc 90). Tung dot chi de tham khao: khop giua bi gang che, vi tri theo cach gan nhan.
+        # p90 = the reported length: a tilted finger only looks SHORTER in the image, the longest frames are closest to the truth
+        # (first session: index p90 90.4 mm, ruler 90). Single segments are for reference only: the glove hides the middle joints.
         print(f"  {'dot':20s} {'p90':>7s} {'trung vi':>9s} {'p25-p75':>13s} {'nua dau':>8s} {'nua sau':>8s} {'r(kc)':>6s}" +
               (f" {'thuoc':>7s} {'lech p90':>9s}" if ruler else ""))
         for c in cols:
