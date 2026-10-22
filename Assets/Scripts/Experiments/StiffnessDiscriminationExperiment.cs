@@ -5,33 +5,30 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 
 /// <summary>
-/// Thi nghiem PHAN BIET DO CUNG: moi luot co 2 qua bong trong giong het nhau,
-/// 1 qua CHUAN va 1 qua SO SANH (cung hon hoac mem hon); nguoi thu bop ca 2
-/// roi chon qua CUNG HON. Khong bao dung/sai sau moi luot (dung chuan
-/// thi nghiem tam-vat ly -- "method of constant stimuli").
+/// STIFFNESS DISCRIMINATION experiment: each trial shows two identical-looking balls, one STANDARD and one
+/// COMPARISON (stiffer or softer); the participant squeezes both and picks the STIFFER one. No right/wrong
+/// feedback after a trial (standard psychophysics, "method of constant stimuli").
 ///
-/// Chay lai dung bai nay o cac dieu kien khac nhau (chi hinh anh / hinh anh +
-/// rung tay cam / hinh anh + gang) roi so ti le chon dung -> biet haptic co
-/// giup phan biet do cung tot hon khong. Y tuong tu cac nghien cuu
-/// pseudo-haptics (vd Weiss et al., CHI 2023).
+/// Run the same task under different conditions (visual only / visual + controller vibration / visual + glove)
+/// and compare the proportion correct -> does haptics help to tell stiffness apart? Idea from pseudo-haptics
+/// studies (e.g. Weiss et al., CHI 2023).
 ///
-/// Dieu khien (tay cam PHAI, hoac ban phim khi chay trong Editor):
-///   A / Space        : bat dau (va sang luot sau khi xong)
-///   B / R            : dat lai vi tri 2 qua bong truoc mat
-///   Can analog trai/phai, hoac mui ten trai/phai : chon qua ben TRAI / PHAI cung hon
+/// Controls (RIGHT controller, or keyboard in the Editor):
+///   A / Space                              : start (and go to the next trial when done)
+///   B / R                                  : re-place the two balls in front of the head
+///   Thumbstick left/right, or arrow keys   : choose the LEFT / RIGHT ball as the stiffer one
 ///
-/// Ghi 2 file CSV (xem ExperimentCsvWriter): moi luot 1 dong, moi su kien
-/// cham/cam/tha 1 dong.
+/// Writes 2 CSV files (see ExperimentCsvWriter): one row per trial, and one row per touch/grab/release event.
 /// </summary>
-[DefaultExecutionOrder(400)] // sau SquishyPinchable (100) va HapticRenderer (150): doc so lieu da cap nhat
+[DefaultExecutionOrder(400)] // after SquishyPinchable (100) and HapticRenderer (150): reads updated values
 public class StiffnessDiscriminationExperiment : MonoBehaviour
 {
     [Serializable]
     public struct StiffnessLevel
     {
-        [Tooltip("Do lun toi da, theo phan cua ban kinh. Nho = cung.")]
+        [Tooltip("Maximum compression, as a fraction of the radius. Small = stiff.")]
         [Range(0.02f, 0.6f)] public float maxIndentFraction;
-        [Tooltip("Luc (0..1) khi lun den muc toi da. Lon = cung.")]
+        [Tooltip("Force (0..1) at maximum compression. Large = stiff.")]
         [Range(0f, 1f)] public float pressureAtMaxIndent;
 
         public StiffnessLevel(float maxIndentFraction, float pressureAtMaxIndent)
@@ -40,35 +37,35 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
             this.pressureAtMaxIndent = pressureAtMaxIndent;
         }
 
-        /// <summary>Cung hon = lun it hon (so sanh chinh), neu bang nhau thi luc lon hon.</summary>
+        /// <summary>Stiffer = compresses less (main criterion); if equal, the larger force.</summary>
         public bool IsStifferThan(StiffnessLevel other) =>
             maxIndentFraction != other.maxIndentFraction
                 ? maxIndentFraction < other.maxIndentFraction
                 : pressureAtMaxIndent > other.pressureAtMaxIndent;
     }
 
-    [Header("Người thử & điều kiện (ghi vào tên file và từng dòng)")]
+    [Header("Participant & condition (written to the file name and every row)")]
     [SerializeField] private string _participantId = "P01";
-    [Tooltip("Ten dieu kien, vd 'visual', 'visual+vibration', 'visual+glove'.")]
+    [Tooltip("Condition name, e.g. 'visual', 'visual+vibration', 'visual+glove'.")]
     [SerializeField] private string _conditionLabel = "visual+vibration";
-    [Tooltip("Bat/tat cac dau ra haptic ben duoi cho dieu kien nay (TAT = chi co hinh anh).")]
+    [Tooltip("Enables/disables the haptic outputs below for this condition (OFF = visual only).")]
     [SerializeField] private bool _hapticsEnabled = true;
     [SerializeField] private MonoBehaviour[] _hapticOutputs;
 
-    [Header("Vật và hiển thị")]
-    [Tooltip("Qua ben TRAI (tu goc nhin nguoi thu).")]
+    [Header("Objects and display")]
+    [Tooltip("The LEFT ball (from the participant's point of view).")]
     [SerializeField] private SquishyPinchable _leftBall;
-    [Tooltip("Qua ben PHAI.")]
+    [Tooltip("The RIGHT ball.")]
     [SerializeField] private SquishyPinchable _rightBall;
     [SerializeField] private HapticRenderer _hapticRenderer;
     [SerializeField] private Transform _head;
     [SerializeField] private TMP_Text _instructions;
-    [Tooltip("An cac object nay trong luc chay thi nghiem (vd qua bong thu khac).")]
+    [Tooltip("Objects hidden while the experiment runs (e.g. another test ball).")]
     [SerializeField] private GameObject[] _hideWhileRunning;
-    [Tooltip("Vi tri cap bong so voi dau luc dat lai: y = cao/thap, z = xa.")]
+    [Tooltip("Position of the ball pair relative to the head when re-placed: y = up/down, z = forward.")]
     [SerializeField] private Vector3 _placementOffset = new Vector3(0f, -0.15f, 0.35f);
 
-    [Header("Mức độ cứng")]
+    [Header("Stiffness levels")]
     [SerializeField] private StiffnessLevel _standard = new StiffnessLevel(0.25f, 0.6f);
     [SerializeField] private StiffnessLevel[] _comparisons =
     {
@@ -80,10 +77,10 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         new StiffnessLevel(0.40f, 0.30f),
     };
     [SerializeField] private int _repeatsPerComparison = 4;
-    [Tooltip("Bat buoc cham CA 2 qua truoc khi duoc tra loi.")]
+    [Tooltip("Both balls must be touched before answering.")]
     [SerializeField] private bool _requireTouchBoth = true;
     [SerializeField] private float _pauseBetweenTrials = 1f;
-    [Tooltip("0 = ngau nhien moi lan. Dat so khac 0 de lap lai dung thu tu luot (vd khi so sanh dieu kien).")]
+    [Tooltip("0 = random every time. Any other value repeats the same trial order (e.g. to compare conditions).")]
     [SerializeField] private int _randomSeed;
 
     private enum Phase { Waiting, Trial, Pause, Done }
@@ -130,8 +127,8 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         if (_hapticRenderer != null) _hapticRenderer.WhenHapticEvent += OnHapticEvent;
         PlaceInFrontOfHead();
         SetBallsVisible(false);
-        // Chu hien trong kinh viet KHONG DAU: font mac dinh cua TextMeshPro
-        // khong co dau tieng Viet (se hien o vuong).
+        // Headset text is written WITHOUT Vietnamese diacritics: TextMeshPro's default font has no
+        // Vietnamese glyphs (they would show as boxes).
         Show($"THI NGHIEM DO CUNG\nNguoi thu: {_participantId}   Dieu kien: {_conditionLabel}\n\nBam A (tay cam phai) de bat dau\nBam B de dat lai vi tri bong");
     }
 
@@ -153,7 +150,7 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
                 break;
 
             case Phase.Trial:
-                int answer = AnswerPressed(); // -1 trai, +1 phai, 0 chua
+                int answer = AnswerPressed(); // -1 left, +1 right, 0 none yet
                 if (answer != 0) TryAnswer(answer < 0);
                 break;
 
@@ -178,7 +175,7 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         Sample(_rightBall, _rightStats);
     }
 
-    // --- Phien / luot ----------------------------------------------------------
+    // --- Session / trials --------------------------------------------------------
 
     private void BeginSession()
     {
@@ -187,13 +184,13 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         _correctByComparison.Clear();
         foreach (var comparison in _comparisons)
         {
-            _correctByComparison[comparison.maxIndentFraction] = new int[2]; // [dung, tong]
+            _correctByComparison[comparison.maxIndentFraction] = new int[2]; // [correct, total]
             for (int r = 0; r < _repeatsPerComparison; r++)
             {
                 _trials.Add(new Trial { comparison = comparison, standardOnLeft = rng.Next(2) == 0 });
             }
         }
-        // Xao tron thu tu (Fisher-Yates)
+        // Shuffle the order (Fisher-Yates)
         for (int i = _trials.Count - 1; i > 0; i--)
         {
             int j = rng.Next(i + 1);
@@ -212,13 +209,13 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
             "timestamp");
         _eventLog = new ExperimentCsvWriter(_sessionTag + "_events.csv",
             "participant", "condition", "trial", "t_s", "finger", "event", "object", "amplitude");
-        Debug.Log($"[Experiment] Ghi du lieu vao {_trialLog.FilePath}", this);
+        Debug.Log($"[Experiment] Writing data to {_trialLog.FilePath}", this);
 
         foreach (var go in _hideWhileRunning)
         {
             if (go != null) go.SetActive(false);
         }
-        // Luc ung dung vua mo, kinh co the chua co vi tri dau -> dat lai o day
+        // Right after the app starts the headset may not know the head pose yet -> place again here
         PlaceInFrontOfHead();
         _trialIndex = 0;
         BeginTrial();
@@ -307,7 +304,7 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         _trialLog = _eventLog = null;
     }
 
-    // --- Do dac -----------------------------------------------------------------
+    // --- Measurements ------------------------------------------------------------
 
     private void Sample(SquishyPinchable ball, BallStats stats)
     {
@@ -336,7 +333,7 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
             finger.ToString(), type.ToString(), side, transient.amplitude);
     }
 
-    // --- Tien ich ---------------------------------------------------------------
+    // --- Helpers -----------------------------------------------------------------
 
     private static void Apply(SquishyPinchable ball, StiffnessLevel level)
     {
@@ -350,8 +347,8 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         if (_rightBall != null) _rightBall.gameObject.SetActive(visible);
     }
 
-    /// <summary>Dat cap bong truoc mat, CO DINH trong khong gian (khong di theo
-    /// dau nua) de nguoi thu vuon tay toi.</summary>
+    /// <summary>Places the ball pair in front of the head, FIXED in space (no longer following the head)
+    /// so the participant reaches out to it.</summary>
     private void PlaceInFrontOfHead()
     {
         if (_head == null) return;
@@ -379,7 +376,7 @@ public class StiffnessDiscriminationExperiment : MonoBehaviour
         return s.Replace(' ', '-').Replace('+', '-');
     }
 
-    // --- Dieu khien -------------------------------------------------------------
+    // --- Controls ----------------------------------------------------------------
 
     private static bool StartPressed() =>
         OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch) ||

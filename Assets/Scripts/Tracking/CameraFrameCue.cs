@@ -1,75 +1,77 @@
 using UnityEngine;
 
 /// <summary>
-/// Nhac nguoi dung giu tay TRONG khung camera mau. Camera nhin hep hon tam nhin trong kinh, nen nguoi dung
-/// van thay tay minh va hay de tay lech ra mep ma khong biet -> Python mat diem, tay ao vat veo.
+/// Reminds the user to keep the hand INSIDE the colour camera's view. The camera sees less than the view inside
+/// the headset, so users still see their hand and often let it drift to the edge without noticing -> Python loses
+/// points and the virtual hand twists.
 ///
-/// Vi tri tay tren anh lay tu (theo thu tu):
-///   1. 9 diem Python gui ve -- chinh xac, ke ca diem model doan nam NGOAI anh;
-///   2. Python khong thay tay: tam tay theo Quest chieu len anh (GloveLiveStreamer; camera tracking cua Quest
-///      nhin rong hon camera mau);
-///   3. ca hai mat: vi tri cuoi cung, giu them _forgetSeconds.
+/// Hand position in the image, in order of preference:
+///   1. The 9 points from Python: accurate, including points the model guesses OUTSIDE the image;
+///   2. Python does not see the hand: the Quest's hand centre projected into the image (GloveLiveStreamer; the
+///      Quest's tracking cameras see wider than the colour camera);
+///   3. both lost: the last known position, kept for _forgetSeconds.
 ///
-/// Muc nhac:
-///   - tay o vung giua anh: khong hien gi;
-///   - tay vao dai mep (_edgeBand): tay gang ao nga mau cam + mo dan, mui ten o mep khung chi vao giua;
-///   - tay ra ngoai khung: hien them khung chu nhat mo = vung camera nhin thay.
-/// Tat component nay = khong nhac (de so sanh trong thi nghiem).
+/// Cue levels:
+///   - hand in the middle of the image: nothing shown;
+///   - hand in the edge band (_edgeBand): the virtual glove hand turns orange and fades, and an arrow at the edge
+///     points towards the centre;
+///   - hand outside the image: a faint rectangle also shows the area the camera sees.
+/// Disable this component to turn the cues off (to compare in an experiment).
 ///
-/// Gan cung object voi FingerUDPReceiver cua tay gang (StaticHandModel_Right).
+/// Put it on the same object as the glove hand's FingerUDPReceiver (StaticHandModel_Right).
 /// </summary>
 [DefaultExecutionOrder(400)]
 public class CameraFrameCue : MonoBehaviour
 {
-    [Header("Nguồn")]
-    [Tooltip("De trong = tim tren cung object.")]
+    [Header("Sources")]
+    [Tooltip("Empty = find on the same object.")]
     [SerializeField] private FingerUDPReceiver _receiver;
-    [Tooltip("De trong = tu tim trong scene.")]
+    [Tooltip("Empty = find in the scene.")]
     [SerializeField] private GloveLiveStreamer _streamer;
-    [Tooltip("Mat nguoi xem (CenterEyeAnchor). De trong = Camera.main.")]
+    [Tooltip("The viewer's eyes (CenterEyeAnchor). Empty = Camera.main.")]
     [SerializeField] private Transform _head;
 
-    [Header("Vùng an toàn (theo tỉ lệ ảnh)")]
-    [Tooltip("Tay cach mep anh it hon khoang nay (phan cua chieu rong / cao anh) thi bat dau nhac; cham mep = nhac manh nhat.")]
+    [Header("Safe area (fraction of the image)")]
+    [Tooltip("The cue starts when the hand is closer than this to the image edge (fraction of the image width / height); touching the edge = strongest cue.")]
     [Range(0.02f, 0.3f)]
     [SerializeField] private float _edgeBand = 0.12f;
-    [Tooltip("Python khong gui anh moi co diem trong bay lau (giay) thi dung vi tri tay theo Quest.")]
+    [Tooltip("If Python sends no new image with points for this long (s), use the Quest's hand position.")]
     [SerializeField] private float _pointsTimeout = 0.3f;
-    [Tooltip("Ca 2 nguon deu mat tay: giu vi tri cuoi bay lau (giay) roi tat nhac (vd tay da buong xuong).")]
+    [Tooltip("Both sources lost the hand: keep the last position this long (s), then turn the cue off (e.g. the hand was lowered).")]
     [SerializeField] private float _forgetSeconds = 1.5f;
-    [Tooltip("Nhac hien / tat muot trong khoang nay (giay).")]
+    [Tooltip("The cue fades in / out over this time (s).")]
     [SerializeField] private float _fadeSeconds = 0.15f;
 
-    [Header("Tay găng ảo")]
-    [Tooltip("Renderer tay gang (material OculusHand). De trong = SkinnedMeshRenderer dang bat dau tien duoi object nay.")]
+    [Header("Virtual glove hand")]
+    [Tooltip("Glove hand renderer (OculusHand material). Empty = the first enabled SkinnedMeshRenderer under this object.")]
     [SerializeField] private Renderer _handRenderer;
     [SerializeField] private Color _cueColor = new Color(1f, 0.5f, 0.1f);
-    [Tooltip("Mau tay nga sang _cueColor toi muc nay (0..1) khi nhac manh nhat.")]
+    [Tooltip("The hand colour blends towards _cueColor up to this amount (0..1) at the strongest cue.")]
     [Range(0f, 1f)]
     [SerializeField] private float _maxTint = 0.8f;
-    [Tooltip("Do dac cua tay khi nhac manh nhat (material OculusHand goc: 0.79).")]
+    [Tooltip("Hand opacity at the strongest cue (original OculusHand material: 0.79).")]
     [Range(0f, 1f)]
     [SerializeField] private float _minOpacity = 0.35f;
 
-    [Header("Mũi tên + khung camera")]
-    [Tooltip("Material TRONG SUOT (URP Unlit, Surface = Transparent) -- dung chung FingertipCue.mat. Mau dat qua _BaseColor.")]
+    [Header("Arrow + camera frame")]
+    [Tooltip("A TRANSPARENT material (URP Unlit, Surface = Transparent), shared with FingertipCue.mat. Colour set via _BaseColor.")]
     [SerializeField] private Material _material;
-    [Tooltip("Mui ten va khung ve cach camera bay nhieu met (theo truc nhin cua camera).")]
+    [Tooltip("Distance (m) from the camera, along its view axis, at which the arrow and frame are drawn.")]
     [SerializeField] private float _distance = 0.45f;
-    [Tooltip("Chieu dai mui ten (met).")]
+    [Tooltip("Arrow length (m).")]
     [SerializeField] private float _arrowLength = 0.05f;
-    [Tooltip("Do day net khung (met).")]
+    [Tooltip("Frame line width (m).")]
     [SerializeField] private float _lineWidth = 0.003f;
     [SerializeField] private Color _arrowColor = new Color(1f, 0.55f, 0.1f, 0.9f);
     [SerializeField] private Color _frameColor = new Color(1f, 0.55f, 0.1f, 0.5f);
 
-    [Header("Chỉ đọc (xem trong Play mode)")]
+    [Header("Read only (watch in Play mode)")]
     [SerializeField] private string _source = "";
-    [Tooltip("0 = tay o giua anh, 1 = cham / ra ngoai mep.")]
+    [Tooltip("0 = hand in the middle of the image, 1 = touching / outside the edge.")]
     [SerializeField] private float _level;
     [SerializeField] private bool _outside;
 
-    /// <summary>Muc nhac hien tai 0..1 (de ghi log).</summary>
+    /// <summary>Current cue level 0..1 (for logging).</summary>
     public float Level01 => _level;
     public bool Outside => _outside;
 
@@ -88,7 +90,7 @@ public class CameraFrameCue : MonoBehaviour
     private Vector2 _handCenterUV;
     private float _frameLevel;
 
-    // Vi tri / huong camera mau so voi mat (co dinh tren kinh) -- uoc luong dan, de ve khung khong tre theo anh
+    // Pose of the colour camera relative to the eyes (fixed on the headset), estimated over time so the frame does not lag behind the image
     private Vector3 _offP;
     private Quaternion _offR = Quaternion.identity;
     private bool _hasOffset;
@@ -167,7 +169,7 @@ public class CameraFrameCue : MonoBehaviour
             target = Mathf.Clamp01((_edgeBand - margin) / _edgeBand);
             _handCenterUV = box.center;
             bool centerOut = _handCenterUV.x < 0f || _handCenterUV.x > 1f || _handCenterUV.y < 0f || _handCenterUV.y > 1f;
-            // Mat tay o mep (vi tri cuoi con trong dai mep) = coi nhu da ra ngoai
+            // Hand lost at the edge (last position still in the edge band) = treat as outside
             _outside = centerOut || (fromLast && margin < _edgeBand);
             if (_outside) target = 1f;
             else if (fromLast) target = 0f;
@@ -182,7 +184,7 @@ public class CameraFrameCue : MonoBehaviour
         UpdateFrame();
     }
 
-    /// <summary>Khung bao ban tay tren anh (ti le anh, goc TREN-trai; co the vuot ra ngoai 0..1).</summary>
+    /// <summary>Bounding box of the hand in the image (image fractions, TOP-left origin; may extend outside 0..1).</summary>
     private bool TryGetHandBox(out Rect box, out bool fromLast)
     {
         box = default;
@@ -198,7 +200,7 @@ public class CameraFrameCue : MonoBehaviour
             }
             if (now - _lastPointsTime <= _pointsTimeout)
             {
-                // Lay ca 9 diem, ke ca diem doan nam ngoai anh (Python gui do tin 0 cho chung nhung van gui vi tri)
+                // Use all 9 points, including guessed points outside the image (Python sends confidence 0 for them but still sends the position)
                 Vector2 min = _uv[0], max = _uv[0];
                 for (int i = 1; i < _uv.Length; i++)
                 {
@@ -212,7 +214,7 @@ public class CameraFrameCue : MonoBehaviour
 
         if (_streamer != null && _streamer.TryGetLatestHandHint(out Vector2 c, out Vector2 palm, out float age) && age <= _pointsTimeout)
         {
-            // ~1 long ban tay moi phia tam (khop goc ngon giua) = ca ban tay
+            // About one palm length on each side of the centre (middle finger base joint) = the whole hand
             Vector2 half = Vector2.Max(palm, new Vector2(0.04f, 0.04f));
             box = new Rect(c - half, 2f * half);
             return Remember(box, "quest");
@@ -237,8 +239,8 @@ public class CameraFrameCue : MonoBehaviour
         return true;
     }
 
-    /// <summary>Uoc luong vi tri/huong camera mau so voi mat. Anh chup truoc vai chuc ms nen chi cap nhat luc dau
-    /// gan dung yen, va lam muot -- gia tri that la hang so (camera gan cung tren kinh).</summary>
+    /// <summary>Estimates the colour camera's pose relative to the eyes. The image was taken tens of ms earlier, so this
+    /// only updates while the head is nearly still, and is smoothed; the real value is constant (the camera is fixed to the headset).</summary>
     private void UpdateCameraOffset(float dt)
     {
         if (_streamer == null || _head == null || !_streamer.TryGetLatestCameraPose(out Pose cam)) return;
@@ -260,7 +262,7 @@ public class CameraFrameCue : MonoBehaviour
         _offP = Vector3.Lerp(_offP, p, a);
     }
 
-    /// <summary>Diem tren tia qua uv (anh, goc TREN-trai), cach camera _distance theo truc nhin. false = chua co camera.</summary>
+    /// <summary>Point on the ray through uv (image, TOP-left origin), _distance from the camera along its view axis. false = no camera yet.</summary>
     private bool ImagePointWorld(Vector2 uv, out Vector3 world)
     {
         world = default;
@@ -275,7 +277,7 @@ public class CameraFrameCue : MonoBehaviour
     private void ApplyHandTint()
     {
         if (_handRenderer == null) return;
-        if (_level <= 0f && !_tinted) return;    // khong nhac: de nguyen cho cac script khac
+        if (_level <= 0f && !_tinted) return;    // no cue: leave the renderer to other scripts
         _handRenderer.GetPropertyBlock(_block);
         float k = _level * _maxTint;
         _block.SetColor(ColorTopId, Color.Lerp(_baseTop, _cueColor, k));
@@ -288,7 +290,7 @@ public class CameraFrameCue : MonoBehaviour
     private void UpdateArrow()
     {
         if (_arrow == null) return;
-        // Mui ten nam TRONG khung, phia tay dang lech, chi ve giua anh
+        // The arrow sits INSIDE the frame, on the side the hand drifted to, pointing to the image centre
         Vector2 toCenter = new Vector2(0.5f, 0.5f) - _handCenterUV;
         Vector2 at = new Vector2(Mathf.Clamp(_handCenterUV.x, _edgeBand, 1f - _edgeBand),
                                  Mathf.Clamp(_handCenterUV.y, _edgeBand, 1f - _edgeBand));
@@ -298,7 +300,7 @@ public class CameraFrameCue : MonoBehaviour
         if (!show) return;
 
         Quaternion camR = CameraRotation;
-        Vector3 dir = camR * new Vector3(toCenter.x, -toCenter.y, 0f);   // anh: y huong xuong
+        Vector3 dir = camR * new Vector3(toCenter.x, -toCenter.y, 0f);   // image y points down
         Vector3 n = (pos - _head.position).normalized;
         dir = Vector3.ProjectOnPlane(dir, n).normalized;
         _arrow.transform.SetPositionAndRotation(pos, Quaternion.LookRotation(n, Vector3.Cross(n, dir)));
@@ -328,7 +330,7 @@ public class CameraFrameCue : MonoBehaviour
         r.SetPropertyBlock(_block);
     }
 
-    /// <summary>Mui ten trong mat phang XY, chi theo +X, dai 1 (scale = chieu dai that); ve ca 2 mat.</summary>
+    /// <summary>Arrow in the XY plane, pointing along +X, length 1 (scale = real length); both faces are drawn.</summary>
     private static Mesh BuildArrowMesh()
     {
         var mesh = new Mesh { name = "CameraFrameCueArrow" };
@@ -339,8 +341,8 @@ public class CameraFrameCue : MonoBehaviour
         };
         mesh.triangles = new[]
         {
-            0, 2, 1, 0, 3, 2, 4, 6, 5,     // mat nhin tu -Z (phia mat nguoi xem)
-            0, 1, 2, 0, 2, 3, 4, 5, 6,     // mat sau
+            0, 2, 1, 0, 3, 2, 4, 6, 5,     // face seen from -Z (the viewer's side)
+            0, 1, 2, 0, 2, 3, 4, 5, 6,     // back face
         };
         mesh.RecalculateBounds();
         return mesh;

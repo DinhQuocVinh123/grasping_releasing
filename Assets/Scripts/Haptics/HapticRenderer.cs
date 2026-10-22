@@ -2,50 +2,49 @@ using System;
 using UnityEngine;
 
 /// <summary>
-/// Tinh TIN HIEU HAPTIC cho ngon cai + ngon tro cua MOT ban tay, roi gui toi
-/// moi thiet bi dau ra (IHapticGlove) -- gang that, rung tay cam, bang debug.
+/// Computes the HAPTIC SIGNALS for the thumb and index finger of ONE hand and sends them to every output device
+/// (IHapticGlove): the glove, the controller vibration, the debug output.
 ///
-/// Moi khung hinh, voi tung ngon:
-///   1. Luc LIEN TUC: da ngon THAT an sau bao nhieu vao vat. Theo phuong phap
-///      god-object (Zilles &amp; Salisbury 1995): ngon ao bi giu tren be mat
-///      (FingertipSurfaceConstraint), do lech giua ngon that va ngon ao chinh
-///      la luc can tao ra.
-///   2. SU KIEN: cham / roi / cam / tha -> moi su kien 1 xung rung ngan (Kuchenbecker
-///      et al. 2006); xung cham manh hay nhe theo toc do an vao.
+/// Every frame, for each finger:
+///   1. CONTINUOUS force: how deep the REAL fingertip is inside the object. This follows the god-object method
+///      (Zilles &amp; Salisbury 1995): the virtual finger is held on the surface (FingertipSurfaceConstraint), and
+///      the gap between the real and the virtual finger is the force to render.
+///   2. EVENTS: touch / untouch / grab / release -> one short vibration pulse each (Kuchenbecker et al. 2006);
+///      the touch pulse is stronger for a faster approach.
 ///
-/// Tat ca tinh ngay tren kinh, tu va cham AO -- khong cho vong qua may tinh,
-/// de do tre giua hinh va cam giac nho nhat co the.
+/// Everything is computed on the headset from VIRTUAL contact, without a round trip through the PC, to keep the
+/// delay between what is seen and what is felt as small as possible.
 /// </summary>
-[DefaultExecutionOrder(150)] // sau SquishyPinchable (100), TRUOC FingertipSurfaceConstraint (200)
+[DefaultExecutionOrder(150)] // after SquishyPinchable (100), BEFORE FingertipSurfaceConstraint (200)
 public class HapticRenderer : MonoBehaviour
 {
-    [Header("Đầu ngón THẬT (chưa bị đẩy ra khỏi vật)")]
-    [Tooltip("Tay tran: LeftThumbTip (do IsdkFingertipProxy cap nhat). Tay gang: XRHand_ThumbTip -- script chay truoc FingertipSurfaceConstraint nen van doc duoc vi tri that.")]
+    [Header("REAL fingertips (not yet pushed out of the object)")]
+    [Tooltip("Bare hand: LeftThumbTip (updated by IsdkFingertipProxy). Glove hand: XRHand_ThumbTip; this script runs before FingertipSurfaceConstraint, so it still reads the real position.")]
     [SerializeField] private Transform _thumbTip;
     [SerializeField] private Transform _indexTip;
 
-    [Header("Vật cảm nhận được")]
-    [Tooltip("De trong = moi vat bop duoc trong scene.")]
+    [Header("Objects that can be felt")]
+    [Tooltip("Empty = every squeezable object in the scene.")]
     [SerializeField] private SquishyPinchable[] _objects;
-    [Tooltip("Khoi cung (khong lun). De trong = moi PhysicsPinchGrabbable trong scene. Do cung lay tu HapticMaterial tren khoi: " +
-             "Pressure At Max Indent = 0, Extra Depth To Full Pressure = so met ngon that lan vao thi luc dat toi da.")]
+    [Tooltip("Rigid cubes (no compression). Empty = every PhysicsPinchGrabbable in the scene. Stiffness comes from the cube's HapticMaterial: " +
+             "Pressure At Max Indent = 0, Extra Depth To Full Pressure = how far (m) the real finger goes in to reach full force.")]
     [SerializeField] private PhysicsPinchGrabbable[] _cubes;
 
-    [Header("Thiết bị đầu ra (mọi component có IHapticGlove)")]
+    [Header("Output devices (any component implementing IHapticGlove)")]
     [SerializeField] private MonoBehaviour[] _outputs;
 
-    [Header("Chống nhấp nháy ở mép bề mặt")]
-    [Tooltip("Da ngon phai roi xa be mat hon khoang nay (met) moi tinh la 'roi'. Tranh cham/roi lien tuc khi ngon run o ngay mep.")]
+    [Header("No flicker at the surface edge")]
+    [Tooltip("The fingertip must move this far (m) away from the surface to count as 'left'. Avoids constant touch/untouch while the finger trembles at the edge.")]
     [SerializeField] private float _untouchHysteresis = 0.002f;
 
-    [Header("Kẹp hai ngón")]
-    [Tooltip("Vat dang bi CAM giua ngon cai va ngon tro: hai ngon nhan CUNG muc luc, nguoc chieu nhau theo duong noi hai dau ngon " +
-             "-- vat dung yen giua hai ngon thi luc hai ben phai bang nhau. Do lun chung = trung binh do lun hai ngon = nua do bop, " +
-             "khong phu thuoc vat dang lech ve ngon nao (tracking dat ngon tro hut vai mm thi ngon tro van cham cung luc ngon cai). " +
-             "Tat = moi ngon tinh rieng theo do lun cua no, huong tu tam vat ra dau ngon.")]
+    [Header("Two-finger pinch")]
+    [Tooltip("An object HELD between thumb and index: both fingers get the SAME force, in opposite directions along the line between the fingertips " +
+             "(an object at rest between two fingers needs equal forces on both sides). The shared depth = mean of both fingers' depths = half the squeeze, " +
+             "regardless of which finger the object sits closer to (if tracking puts the index a few mm short, the index still gets the same force as the thumb). " +
+             "Off = each finger uses its own depth, direction from the object centre to the fingertip.")]
     [SerializeField] private bool _equalPinchForces = true;
 
-    /// <summary>Trang thai hien tai cua 1 ngon -- de hien thi / ghi log.</summary>
+    /// <summary>Current state of one finger, for display / logging.</summary>
     [Serializable]
     public struct FingerState
     {
@@ -53,27 +52,27 @@ public class HapticRenderer : MonoBehaviour
         public float depthMeters;
         public float pressure01;
         public SquishyPinchable touchedObject;
-        [Tooltip("Luc vat day nguoc len ngon (Newton, toa do the gioi): huong theo phap tuyen be mat, do lon = muc luc x MaxForceNewton cua vat.")]
+        [Tooltip("Force the object pushes back on the finger (N, world space): along the surface normal, magnitude = force level x the object's MaxForceNewton.")]
         public Vector3 forceNewton;
     }
 
-    [Header("Chỉ đọc (xem trong Play mode)")]
+    [Header("Read only (watch in Play mode)")]
     [SerializeField] private FingerState[] _state = new FingerState[2];
 
-    /// <summary>Phat ra moi khi co su kien -- cho log / thi nghiem. Tham so cuoi
-    /// la vat lien quan (co the null neu khong xac dinh duoc).</summary>
+    /// <summary>Raised on every event, for logging / experiments. The last argument is the object involved
+    /// (may be null if unknown).</summary>
     public event Action<HapticFinger, HapticEventType, HapticTransient, SquishyPinchable> WhenHapticEvent;
 
     public FingerState GetState(HapticFinger finger) => _state[(int)finger];
 
     private readonly float[] _previousDepth = new float[2];
-    private readonly Component[] _touchedTarget = new Component[2]; // bong hoac khoi dang cham -- vat lieu cho xung Untouch
+    private readonly Component[] _touchedTarget = new Component[2]; // ball or cube being touched -- material for the Untouch pulse
     private IHapticGlove[] _gloves;
     private SquishyPinchable[] _heldLastFrame = Array.Empty<SquishyPinchable>();
 
     private void LateUpdate() => Tick(Time.deltaTime);
 
-    /// <summary>Mot buoc tinh. Public de chay thu ngoai Play mode.</summary>
+    /// <summary>One computation step. Public so it can run outside Play mode.</summary>
     public void Tick(float dt)
     {
         if (dt <= 0f) return;
@@ -88,14 +87,14 @@ public class HapticRenderer : MonoBehaviour
         UpdateGrabEvents(objects);
     }
 
-    /// <summary>Do lun cua 1 dau ngon vao vat SAU NHAT ma no an vao (bong HOAC khoi).</summary>
+    /// <summary>Penetration of one fingertip into the object it is DEEPEST in (ball OR cube).</summary>
     private struct Contact
     {
-        public bool valid;              // dau ngon dang co (dang theo doi duoc)
-        public float depth;             // met, + = trong vat
-        public SquishyPinchable obj;    // bong
-        public PhysicsPinchGrabbable cube; // khoi cung
-        public Vector3 normal;          // huong vat day ngon ra; zero = hoi vat (ContactNormal)
+        public bool valid;              // the fingertip exists (is tracked)
+        public float depth;             // m, + = inside the object
+        public SquishyPinchable obj;    // ball
+        public PhysicsPinchGrabbable cube; // rigid cube
+        public Vector3 normal;          // direction the object pushes the finger; zero = ask the object (ContactNormal)
 
         public Component Target => obj != null ? obj : cube;
     }
@@ -126,9 +125,10 @@ public class HapticRenderer : MonoBehaviour
         return c;
     }
 
-    /// <summary>Vat dang bi cam giua 2 ngon: ca 2 ngon lay do lun TRUNG BINH (= nua do bop: tong do lun = 2*ban kinh -
-    /// khoang cach 2 dau ngon khi 2 ngon o 2 phia doi dien), luc huong theo duong noi 2 dau ngon, day moi ngon ra xa ngon kia.
-    /// Huong tu tam vat ra dau ngon (ContactNormal) lat chieu khi dau ngon lun gan toi tam -- duong noi 2 ngon thi khong.</summary>
+    /// <summary>Object held between the two fingers: both fingers use the MEAN depth (= half the squeeze: total depth =
+    /// 2 * radius - distance between the tips when they are on opposite sides), force along the line between the tips, pushing
+    /// each finger away from the other. The centre-to-tip direction (ContactNormal) flips when a tip gets close to the centre;
+    /// the line between the two fingers does not.</summary>
     private void SharePinch(System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects, ref Contact thumb, ref Contact index)
     {
         if (!thumb.valid || !index.valid) return;
@@ -150,7 +150,7 @@ public class HapticRenderer : MonoBehaviour
 
     private void SetPinch(ref Contact thumb, ref Contact index, float depth, SquishyPinchable obj, PhysicsPinchGrabbable cube)
     {
-        Vector3 axis = _thumbTip.position - _indexTip.position; // ngon tro -> ngon cai
+        Vector3 axis = _thumbTip.position - _indexTip.position; // index -> thumb
         if (axis.sqrMagnitude < 1e-10f) return;
         axis.Normalize();
 
@@ -176,7 +176,7 @@ public class HapticRenderer : MonoBehaviour
 
         if (touching && !state.touching)
         {
-            // Toc do an vao ngay luc cham: cham nhanh -> xung manh
+            // Approach speed at the moment of contact: a fast touch -> a strong pulse
             float approachSpeed = float.IsInfinity(_previousDepth[f])
                 ? 0f
                 : Mathf.Max(0f, (depth - _previousDepth[f]) / dt);
@@ -191,12 +191,12 @@ public class HapticRenderer : MonoBehaviour
         state.depthMeters = tipValid ? depth : 0f;
         state.touchedObject = touching ? deepest : null;
         _touchedTarget[f] = touching ? target : null;
-        // Khoi cung: do lun toi da = 0 -> luc tang tu 0 len toi da trong Extra Depth To Full Pressure cua vat lieu.
+        // Rigid cube: maximum compression = 0 -> force rises from 0 to full over the material's Extra Depth To Full Pressure.
         float maxIndent = deepest != null ? deepest.MaxIndentMeters : 0f;
         state.pressure01 = touching && target != null
             ? MaterialOf(target).PressureFromDepth(depth, maxIndent)
             : 0f;
-        // Vector luc (god-object): vat day ngon RA NGOAI theo phap tuyen, do lon ti le muc luc.
+        // Force vector (god-object): the object pushes the finger OUTWARD along the normal, magnitude proportional to the force level.
         Vector3 normal = contact.normal;
         if (normal == Vector3.zero && deepest != null) normal = deepest.ContactNormal(tip);
         else if (normal == Vector3.zero && contact.cube != null) normal = contact.cube.ContactNormal(tip);
@@ -211,10 +211,9 @@ public class HapticRenderer : MonoBehaviour
 
     private void UpdateGrabEvents(System.Collections.Generic.IReadOnlyList<SquishyPinchable> objects)
     {
-        // "Da cam" ve mat CAM GIAC = vat dang dinh tay VA ca 2 da ngon da thuc
-        // su cham no. SquishyPinchable co vung "hut" (Grab Margin) nen co the
-        // bat dinh khi ngon con cach be mat vai mm -- neu phat xung Grab ngay
-        // luc do, gang se bao "da cam" truoc khi ngon cham vat.
+        // "Grabbed" in terms of FEEL = the object is held AND both fingertips actually touch it. SquishyPinchable has a
+        // "snap" zone (Grab Margin), so it can attach while a finger is still a few mm from the surface; sending the Grab
+        // pulse at that moment would make the glove say "grabbed" before the finger touches the object.
         var heldNow = new System.Collections.Generic.List<SquishyPinchable>();
         foreach (var obj in objects)
         {
@@ -271,7 +270,7 @@ public class HapticRenderer : MonoBehaviour
             foreach (var output in _outputs)
             {
                 if (output is IHapticGlove glove) list.Add(glove);
-                else if (output != null) Debug.LogWarning($"{output.name}: {output.GetType().Name} khong implement IHapticGlove, bo qua.", this);
+                else if (output != null) Debug.LogWarning($"{output.name}: {output.GetType().Name} does not implement IHapticGlove, ignored.", this);
             }
         }
         _gloves = list.ToArray();

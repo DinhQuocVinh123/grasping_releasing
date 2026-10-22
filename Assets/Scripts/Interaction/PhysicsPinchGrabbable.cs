@@ -2,23 +2,23 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Vat CUNG dung physics that cua Unity (Rigidbody): cam bang cach PINCH
-/// (dau ngon cai + dau ngon tro kep 2 ben vat), tha ra thi ROI theo trong
-/// luc, nay, lan, va NEM duoc (vat giu van toc cua tay luc tha).
+/// A RIGID object driven by real Unity physics (Rigidbody): grabbed with a PINCH (thumb and index tips on two
+/// sides of the object); when released it FALLS under gravity, bounces, rolls, and can be THROWN (it keeps the
+/// hand's velocity at release).
 ///
-/// Khac SquishyPinchable (bong mem, tu tinh do lun + luc, khong dung physics):
-/// vat nay khong bien dang. Cach cam/tha giong bong de 2 vat cam giac nhu nhau:
-///   - cam: CA HAI dau ngon sat be mat (_grabMargin) va o 2 phia doi dien
-///   - tha: 2 ngon mo ra them _releaseOpening so voi luc cam, lien tuc
-///     _releaseDelay giay (chong tha nham khi dau ngon tay gang nhay)
-///   - dang cam: vat gan theo CO TAY (Quest 72 Hz, muot) neu tay co wrist
+/// Unlike SquishyPinchable (soft ball, computes its own compression and force, no physics), this object does not
+/// deform. Grab and release work like the ball so both feel the same:
+///   - grab: BOTH fingertips close to the surface (_grabMargin) and on opposite sides
+///   - release: the fingers open _releaseOpening wider than at grab time, for _releaseDelay seconds in a row
+///     (avoids accidental releases when the glove fingertips jump)
+///   - while held: the object follows the WRIST (Quest 72 Hz, smooth) if the hand has one
 ///
-/// Luc cam, Rigidbody chuyen sang kinematic (physics khong keo vat khoi tay)
-/// nhung van day duoc vat khac; tha ra thi bat lai physics + gan van toc tay.
-/// Roi qua xa (duoi _home 1.5 m, hoac cach _home 4 m) thi tu ve cho cu.
+/// While held the Rigidbody is kinematic (physics cannot pull it out of the hand) but it still pushes other
+/// objects; on release physics is turned back on and the hand's velocity applied.
+/// If it falls too far (1.5 m below _home, or 4 m away from it) it goes back home.
 /// </summary>
 [RequireComponent(typeof(Rigidbody))]
-[DefaultExecutionOrder(100)] // sau FingerUDPReceiver / IsdkFingertipProxy, truoc FingertipSurfaceConstraint (200)
+[DefaultExecutionOrder(100)] // after FingerUDPReceiver / IsdkFingertipProxy, before FingertipSurfaceConstraint (200)
 public class PhysicsPinchGrabbable : MonoBehaviour
 {
     [System.Serializable]
@@ -26,34 +26,34 @@ public class PhysicsPinchGrabbable : MonoBehaviour
     {
         public Transform thumbTip;
         public Transform indexTip;
-        [Tooltip("Tuy chon: co tay -- dang cam thi vat gan theo co tay (muot hon dau ngon tay gang).")]
+        [Tooltip("Optional: the wrist; while held, the object follows the wrist (smoother than the glove fingertips).")]
         public Transform wrist;
     }
 
     [SerializeField] private Hand[] _hands = new Hand[0];
-    [Tooltip("Ban kinh dau ngon (met): diem dau ngon nam trong ngon, da ngon cach diem do chung nay.")]
+    [Tooltip("Fingertip radius (m): the tip point lies inside the finger, the skin is this far from it.")]
     [SerializeField] private float _fingerRadius = 0.008f;
     [SerializeField] private float _grabMargin = 0.02f;
     [SerializeField] private float _releaseOpening = 0.015f;
     [SerializeField] private float _releaseDelay = 0.12f;
-    [Tooltip("Tay dang cam bi mat dau ngan hon muc nay (giay) thi van giu vat.")]
+    [Tooltip("If the holding hand is lost for less than this (s), the object stays held.")]
     [SerializeField] private float _lostGraceSeconds = 0.35f;
-    [Tooltip("Cam kieu 'doi dinh' (antipodal): moi dau ngon phai ep vao mat vat voi goc lech so voi phap tuyen mat do " +
-             "khong qua muc nay (do) -- tuong ung non ma sat (mu ~ 1 -> 45 do). Cham 2 ngon vao CUNG 1 mat hay 2 dau 1 canh thi khong cam duoc.")]
+    [Tooltip("Antipodal grasp: each fingertip must press on a face at an angle to that face's normal of at most this " +
+             "(degrees), i.e. a friction cone (mu ~ 1 -> 45 degrees). Two fingers on the SAME face, or on the two ends of an edge, cannot grab.")]
     [SerializeField] private float _frictionConeDeg = 45f;
-    [Tooltip("Dang cam: vat tu truot ve GIUA 2 dau ngon (theo huong kep) voi toc do nay (1/giay).")]
+    [Tooltip("While held: the object slides back to the MIDDLE between the two tips (along the pinch direction) at this rate (1/s).")]
     [SerializeField] private float _recenterSpeed = 3f;
-    [Tooltip("Dang cam: diem cham cua moi ngon tren mat hop chi TRUOT CHAM theo tay that voi toc do nay (1/giay), " +
-             "va luon o tren CUNG 1 mat da chon luc cam -- khong nhay qua canh sang mat khac.")]
+    [Tooltip("While held: each finger's contact point on the box face SLIDES SLOWLY after the real hand at this rate (1/s), " +
+             "and always stays on the SAME face chosen at grab time, never jumping over an edge to another face.")]
     [SerializeField] private float _contactSlideSpeed = 4f;
-    [Tooltip("Tay khong co wrist: vat truot ve giua 2 dau ngon nhanh co nao.")]
+    [Tooltip("Hand without a wrist: how fast the object slides to the middle of the two tips.")]
     [SerializeField] private float _followSpeed = 20f;
-    [Tooltip("Van toc nem = van toc trung binh cua tay trong khoang nay (giay) truoc luc tha.")]
+    [Tooltip("Throw velocity = the hand's mean velocity over this time (s) before release.")]
     [SerializeField] private float _throwWindow = 0.1f;
     [SerializeField] private float _throwScale = 1f;
 
-    [Header("Ve cho cu")]
-    [Tooltip("Vi tri ban dau / khi dat lai. De trong = vi tri luc bat dau.")]
+    [Header("Return home")]
+    [Tooltip("Start / reset position. Empty = the position at start.")]
     [SerializeField] private Transform _home;
     [SerializeField] private float _resetBelow = 1.5f;
     [SerializeField] private float _resetDistance = 4f;
@@ -68,14 +68,14 @@ public class PhysicsPinchGrabbable : MonoBehaviour
     private bool[] _valid = new bool[0];
     private bool[] _regrabBlocked = new bool[0];
     private float _gapAtGrab, _releaseTimer, _lostTimer;
-    private Vector3 _localPos;      // vi tri vat trong he co tay (hoac so voi diem giua 2 ngon)
+    private Vector3 _localPos;      // object position in the wrist frame (or relative to the midpoint of the two fingers)
     private Quaternion _localRot;
     private Vector3 _homePos;
     private Quaternion _homeRot;
-    private Vector3 _throwLinear, _throwAngular; // van toc luc 2 ngon BAT DAU mo (luc tha that da tre _releaseDelay)
-    private float _clock; // thoi gian mo phong rieng (Tick/PhysicsStep) -- chay thu duoc ngoai vong lap game
-    // Dang cam (hop): mat ma moi ngon ep vao (0 = ngon cai, 1 = ngon tro), chot luc cam.
-    // Ma mat = truc*2 + (1 neu mat phia duong). Diem cham luu trong toa do local cua hop.
+    private Vector3 _throwLinear, _throwAngular; // velocity when the fingers STARTED to open (the actual release comes _releaseDelay later)
+    private float _clock; // own simulation clock (Tick/PhysicsStep), so it can run outside the game loop
+    // While holding (box): the face each finger presses on (0 = thumb, 1 = index), fixed at grab time.
+    // Face code = axis*2 + (1 if the positive side). Contact points are stored in the box's local space.
     private readonly int[] _heldFace = { -1, -1 };
     private readonly Vector3[] _heldPoint = new Vector3[2];
     private readonly Queue<(float t, Vector3 p, Quaternion r)> _history = new Queue<(float, Vector3, Quaternion)>();
@@ -101,10 +101,10 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         _heldBy = -1;
     }
 
-    /// <summary>Dua vat ve cho cu, dung yen.</summary>
+    /// <summary>Puts the object back home, at rest.</summary>
     public void ResetToHome()
     {
-        if (_rb == null) Awake(); // goi truoc Awake (vd tu Editor)
+        if (_rb == null) Awake(); // called before Awake (e.g. from the Editor)
         _heldBy = -1;
         _heldFace[0] = _heldFace[1] = -1;
         _rb.isKinematic = false;
@@ -117,12 +117,12 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         _rb.angularVelocity = Vector3.zero;
     }
 
-    // Cam/tha tinh trong Update (moi khung hinh, cung nhip voi tay). Vat dang cam
-    // di chuyen bang MovePosition trong FixedUpdate de van day duoc vat khac.
+    // Grab/release runs in Update (every frame, in step with the hand). A held object moves with
+    // MovePosition in FixedUpdate so it still pushes other objects.
     private void Update() => Tick(Time.deltaTime);
     private void FixedUpdate() => PhysicsStep(Time.fixedDeltaTime);
 
-    /// <summary>Mot buoc cam/tha. Public de chay thu ngoai Play mode.</summary>
+    /// <summary>One grab/release step. Public so it can run outside Play mode.</summary>
     public void Tick(float dt)
     {
         EnsureState();
@@ -165,7 +165,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
             Pose anchor = Anchor(h);
             _localPos = Quaternion.Inverse(anchor.rotation) * (transform.position - anchor.position);
             _localRot = Quaternion.Inverse(anchor.rotation) * transform.rotation;
-            // Chot mat cho tung ngon (IsAntipodal da xac nhan 2 mat doi dien)
+            // Fix the face for each finger (IsAntipodal has confirmed two opposite faces)
             _heldFace[0] = FaceOf(thumb);
             _heldFace[1] = FaceOf(index);
             if (_heldFace[0] >= 0) _heldPoint[0] = ProjectOnFace(thumb, _heldFace[0]);
@@ -182,17 +182,17 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         if (_valid[h])
         {
             float gap = Vector3.Distance(Tracked(_hands[h].thumbTip), Tracked(_hands[h].indexTip));
-            // Moc = khoang cach luc cam, nhung khong nho hon be day vat giua 2 ngon:
-            // ngon that bop "xuyen" vao vat cung (khong co gi chan) thi noi tay ra
-            // mot chut van con dang cam.
+            // Reference = the gap at grab time, but never less than the object's width between the fingers:
+            // if the real fingers squeeze "through" a rigid object (nothing stops them), relaxing the hand a
+            // little must still keep it held.
             _gapAtGrab = Mathf.Min(_gapAtGrab, Mathf.Max(gap, ObjectWidthBetweenFingers(h)));
-            // Diem cham truot cham theo tay that, nhung khong roi khoi mat da chot
+            // Contact points slide slowly after the real hand, but never leave the chosen face
             float slide = 1f - Mathf.Exp(-_contactSlideSpeed * dt);
             SlideContact(0, Tracked(_hands[h].thumbTip), slide);
             SlideContact(1, Tracked(_hands[h].indexTip), slide);
             bool opening = gap > _gapAtGrab + _releaseOpening;
-            // Nem: tay thuong da cham lai khi dieu kien tha du _releaseDelay -> lay van toc
-            // ngay luc bat dau mo ngon.
+            // Throw: the hand has usually slowed down by the time the release condition has lasted _releaseDelay,
+            // so take the velocity at the moment the fingers start to open.
             if (opening && _releaseTimer == 0f) MeasureVelocity(out _throwLinear, out _throwAngular);
             _releaseTimer = opening ? _releaseTimer + dt : 0f;
             release |= _releaseTimer >= _releaseDelay;
@@ -203,13 +203,13 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         _heldFace[0] = _heldFace[1] = -1;
         _regrabBlocked[h] = _valid[h];
         _rb.isKinematic = false;
-        if (_releaseTimer <= 0f) MeasureVelocity(out _throwLinear, out _throwAngular); // tha vi mat dau tay
+        if (_releaseTimer <= 0f) MeasureVelocity(out _throwLinear, out _throwAngular); // released because the hand was lost
         _rb.linearVelocity = _throwLinear * _throwScale;
         _rb.angularVelocity = _throwAngular;
         _releaseTimer = 0f;
     }
 
-    /// <summary>Mot buoc physics: vat dang cam di theo tay. Public de chay thu.</summary>
+    /// <summary>One physics step: a held object follows the hand. Public so it can be tested.</summary>
     public void PhysicsStep(float dt)
     {
         _clock += dt;
@@ -231,7 +231,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         while (_history.Count > 2 && _clock - _history.Peek().t > _throwWindow) _history.Dequeue();
     }
 
-    /// <summary>Van toc (dai + xoay) trung binh cua vat trong _throwWindow cuoi.</summary>
+    /// <summary>Mean velocity (linear + angular) of the object over the last _throwWindow.</summary>
     private void MeasureVelocity(out Vector3 linear, out Vector3 angular)
     {
         linear = angular = Vector3.zero;
@@ -247,20 +247,20 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         if (!float.IsNaN(axis.x) && !float.IsInfinity(axis.x)) angular = axis * (deg * Mathf.Deg2Rad / span);
     }
 
-    /// <summary>Kep dung kieu doi dinh: 2 diem cham tren 2 mat DOI DIEN, duong noi 2 dau ngon
-    /// nam trong non ma sat cua ca 2 mat (Nguyen 1988, force-closure 2 ngon).</summary>
+    /// <summary>A proper antipodal pinch: two contact points on OPPOSITE faces, with the line between the fingertips
+    /// inside the friction cone of both faces (Nguyen 1988, two-finger force closure).</summary>
     private bool IsAntipodal(Vector3 thumb, Vector3 index)
     {
         Vector3 axis = index - thumb;
         if (axis.sqrMagnitude < 1e-8f) return false;
         axis.Normalize();
         float cosCone = Mathf.Cos(_frictionConeDeg * Mathf.Deg2Rad);
-        // Phap tuyen HUONG RA tai diem cham: ngon cai phai ep nguoc chieu axis, ngon tro cung chieu
+        // OUTWARD normal at the contact: the thumb presses against the axis direction, the index along it
         return Vector3.Dot(OutwardNormal(thumb), -axis) > cosCone &&
                Vector3.Dot(OutwardNormal(index), axis) > cosCone;
     }
 
-    /// <summary>Phap tuyen huong ra cua mat vat gan diem nay nhat.</summary>
+    /// <summary>Outward normal of the object's face closest to this point.</summary>
     private Vector3 OutwardNormal(Vector3 point)
     {
         int face = FaceOf(point);
@@ -270,9 +270,9 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return dir.sqrMagnitude > 1e-10f ? dir.normalized : (point - _collider.bounds.center).normalized;
     }
 
-    /// <summary>Mat hop gan diem nay nhat (ma = truc*2 + 1 neu phia duong). -1 = vat khong phai hop.
-    /// Chon mat co khoang cach co dau (met) LON NHAT: ngoai hop = mat diem vuot ra xa nhat,
-    /// trong hop = mat gan nhat.</summary>
+    /// <summary>The box face closest to this point (code = axis*2 + 1 if the positive side). -1 = the object is not a box.
+    /// Picks the face with the LARGEST signed distance (m): outside the box = the face the point sticks out of most,
+    /// inside the box = the nearest face.</summary>
     public int FaceOf(Vector3 world)
     {
         if (!(_collider is BoxCollider box)) return -1;
@@ -288,7 +288,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return best * 2 + (p[best] >= 0f ? 1 : 0);
     }
 
-    /// <summary>Phap tuyen huong ra (the gioi) cua mat hop.</summary>
+    /// <summary>Outward normal (world) of a box face.</summary>
     private Vector3 FaceNormal(int face)
     {
         Vector3 n = Vector3.zero;
@@ -296,8 +296,8 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return _collider.transform.TransformDirection(n).normalized;
     }
 
-    /// <summary>Chieu diem len mat hop (toa do local cua hop), lui vao trong mep mot chut de
-    /// bung ngon nam han tren mat chu khong vat qua canh.</summary>
+    /// <summary>Projects a point onto a box face (box local space), pulled in from the edges a little so the finger pad
+    /// sits fully on the face instead of hanging over an edge.</summary>
     private Vector3 ProjectOnFace(Vector3 world, int face)
     {
         var box = (BoxCollider)_collider;
@@ -322,15 +322,15 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         _heldPoint[finger] = Vector3.Lerp(_heldPoint[finger], ProjectOnFace(tip, face), k);
     }
 
-    /// <summary>Vi tri dau ngon THEO TAY THAT -- khong phai vi tri ngon ao da bi dat len mat vat
-    /// (dang cam, ngon ao luon nam tren mat nen doc no se khong bao gio thay tay mo ra de tha).</summary>
+    /// <summary>The fingertip position from the REAL hand, not the virtual finger already placed on the object's surface
+    /// (while holding, the virtual finger always sits on the surface, so reading it would never see the hand open to release).</summary>
     private static Vector3 Tracked(Transform tip) => FingertipSurfaceConstraint.TrackedPosition(tip);
 
-    /// <summary>Dau ngon nay (ngon cai / tro) co thuoc tay dang cam vat khong.</summary>
+    /// <summary>Whether this fingertip (thumb / index) belongs to the hand holding the object.</summary>
     public bool IsHoldingTip(Transform tip) =>
         _heldBy >= 0 && tip != null && (_hands[_heldBy].thumbTip == tip || _hands[_heldBy].indexTip == tip);
 
-    /// <summary>Mat hop ma dau ngon nay dang ep vao (dang cam). -1 = khong cam / khong phai hop.</summary>
+    /// <summary>The box face this fingertip is pressing on (while held). -1 = not held / not a box.</summary>
     public int HeldFace(Transform dataTip)
     {
         if (_heldBy < 0 || dataTip == null) return -1;
@@ -339,8 +339,8 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return -1;
     }
 
-    /// <summary>Truot vat (chi theo HUONG KEP) de tam vat ve giua 2 dau ngon: 2 ngon luon om
-    /// 2 mat deu nhau. Lech theo huong khac (vd cam gan 1 dau hop) duoc giu nguyen.</summary>
+    /// <summary>Slides the object (ONLY along the pinch direction) so its centre moves to the middle of the two tips:
+    /// both fingers always hug the two faces evenly. Offsets in other directions (e.g. holding near one end of a box) are kept.</summary>
     private void RecenterBetweenFingers(Pose anchor, float dt)
     {
         Vector3 a = Tracked(_hands[_heldBy].thumbTip), b = Tracked(_hands[_heldBy].indexTip);
@@ -355,7 +355,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         _localPos = Quaternion.Inverse(anchor.rotation) * (pos - anchor.position);
     }
 
-    /// <summary>Diem gan: co tay (neu co) hoac diem giua 2 dau ngon, xoay theo truc 2 ngon.</summary>
+    /// <summary>Attachment point: the wrist (if any) or the midpoint of the two tips, oriented along the finger axis.</summary>
     private Pose Anchor(int h)
     {
         Transform w = _hands[h].wrist;
@@ -366,7 +366,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return new Pose((a + b) * 0.5f, rot);
     }
 
-    /// <summary>Khoang cach tu DA dau ngon toi be mat vat (am = da da lot vao trong).</summary>
+    /// <summary>Distance from the fingertip SKIN to the object's surface (negative = the skin is inside).</summary>
     public float SkinDistance(Vector3 point)
     {
         Vector3 closest = ClosestSurfacePoint(point, out bool inside);
@@ -374,11 +374,11 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return (inside ? -d : d) - _fingerRadius;
     }
 
-    /// <summary>Be day vat giua 2 ngon + 2 lan ban kinh ngon (met) = khe 2 dau ngon khi vua cham 2 mat.
-    /// Hop dang kep 2 mat doi dien: lay be day hop theo truc kep (co dinh). Truoc day lay 2 diem be mat
-    /// gan moi ngon nhat -- ngon that bop sau vao trong hop (khong co gi chan) thi 2 diem do roi sang mat
-    /// ben canh, "be day" teo con ~1-2 cm, moc tha tut theo -> chi noi tay nhe (khe van &lt; be day hop)
-    /// la hop roi (glove_diag 03/10 18:06: 4 lan tha khi khe 4.5-5.6 cm, hop 4 cm + ngon = 5.6 cm).</summary>
+    /// <summary>Object width between the fingers + 2 finger radii (m) = the gap between the tips when they just touch both faces.
+    /// A box pinched on two opposite faces: use the box thickness along the pinch axis (constant). Using the surface points
+    /// closest to each finger failed: when the real fingers squeeze deep into the box (nothing stops them) those points jump to the
+    /// side faces, the "width" shrinks to 1-2 cm and the release threshold drops with it, so relaxing the hand slightly (gap still
+    /// &lt; box width) dropped the box (measured: 4 releases at a gap of 4.5-5.6 cm, box 4 cm + finger = 5.6 cm).</summary>
     private float ObjectWidthBetweenFingers(int h)
     {
         int f0 = _heldFace[0], f1 = _heldFace[1];
@@ -392,8 +392,8 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return Vector3.Distance(pa, pb) + 2f * _fingerRadius;
     }
 
-    /// <summary>Diem gan nhat TREN be mat (ca khi diem nam trong vat) -- Box, Sphere.
-    /// Collider khac: dung Physics.ClosestPoint (chi dung khi diem nam ngoai).</summary>
+    /// <summary>Closest point ON the surface (also when the point is inside) for Box and Sphere colliders.
+    /// Other colliders: Physics.ClosestPoint (only correct when the point is outside).</summary>
     public Vector3 ClosestSurfacePoint(Vector3 world, out bool inside)
     {
         inside = false;
@@ -406,7 +406,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
             if (q == p)
             {
                 inside = true;
-                // Day ra mat gan nhat (tinh theo met, vi box co the bi scale khong deu)
+                // Push out through the nearest face (in metres, since the box may be scaled non-uniformly)
                 Vector3 s = t.lossyScale;
                 float dx = (half.x - Mathf.Abs(p.x)) * Mathf.Abs(s.x);
                 float dy = (half.y - Mathf.Abs(p.y)) * Mathf.Abs(s.y);
@@ -429,9 +429,9 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return Physics.ClosestPoint(world, _collider, transform.position, transform.rotation);
     }
 
-    // --- Cho HapticRenderer: luc len dau ngon khi cham / kep ---
+    // --- For HapticRenderer: force on the fingertips when touching / pinching ---
 
-    /// <summary>Da dau ngon lot vao trong vat bao sau (met, + = trong vat, am = con cach be mat).</summary>
+    /// <summary>How deep the fingertip skin is inside the object (m, + = inside, negative = still away from the surface).</summary>
     public bool TryGetSkinDepth(Transform tip, out float depthMeters)
     {
         depthMeters = float.NegativeInfinity;
@@ -440,7 +440,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return true;
     }
 
-    /// <summary>Huong vat day dau ngon ra (the gioi): phap tuyen mat hop gan dau ngon nhat.</summary>
+    /// <summary>Direction the object pushes the fingertip (world): the normal of the box face closest to the fingertip.</summary>
     public Vector3 ContactNormal(Transform tip)
     {
         if (tip == null || _collider == null) return Vector3.up;
@@ -450,9 +450,9 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return d.sqrMagnitude > 1e-12f ? d.normalized : Vector3.up;
     }
 
-    /// <summary>Dang kep giua DUNG 2 dau ngon nay: do lun CHUNG cua moi ngon = nua do bop (be day vat giua 2 ngon,
-    /// da cong 2 lan ban kinh ngon, tru khe 2 dau ngon). Ngon that bop sau vao trong hop van ra so on dinh va
-    /// khong phu thuoc hop dang lech ve ngon nao -- khac SkinDistance, nhay sang mat ben canh khi ngon lot qua tam.</summary>
+    /// <summary>Pinched between EXACTLY these two tips: the SHARED depth of each finger = half the squeeze (object width between the
+    /// fingers, plus 2 finger radii, minus the gap between the tips). Stays stable when the real fingers squeeze deep into the box and
+    /// does not depend on which finger the box sits closer to, unlike SkinDistance, which jumps to a side face when a finger passes the centre.</summary>
     public bool TryGetPinchDepth(Transform thumbTip, Transform indexTip, out float depthMeters)
     {
         depthMeters = 0f;
@@ -463,14 +463,14 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return true;
     }
 
-    // --- Cho FingertipSurfaceConstraint: ngon ao khong xuyen vat, dang cam thi nam tren be mat ---
+    // --- For FingertipSurfaceConstraint: virtual fingers do not go through the object, and sit on the surface while holding ---
 
-    /// <summary>Da ngon lot vao trong vat -> diem (tam dau ngon) de da ngon vua cham be mat.</summary>
+    /// <summary>Fingertip skin inside the object -> the point (fingertip centre) where the skin just touches the surface.</summary>
     public bool TryResolvePenetration(Transform tip, out Vector3 resolved) =>
         ResolvePoint(tip.position, _fingerRadius, out resolved);
 
-    /// <summary>Mot diem tren TRUC ngon tay (ngon day `radius` met) dang lot vao vat -> diem
-    /// gan nhat de mat ngon vua cham be mat. Dung cho MOI dot ngon, khong chi dau ngon.</summary>
+    /// <summary>A point on the finger's AXIS (finger thickness `radius` m) inside the object -> the nearest point where the
+    /// finger surface just touches the object. Used for EVERY finger segment, not just the tip.</summary>
     public bool ResolvePoint(Vector3 point, float radius, out Vector3 resolved)
     {
         resolved = point;
@@ -483,9 +483,9 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         return true;
     }
 
-    /// <summary>Nhu ResolvePoint, nhung diem LOT VAO TRONG hop luon duoc day ra mat `face` da chot
-    /// (khong phai mat gan nhat) -- gan canh hop, mat gan nhat doi qua lai giua 2 mat moi khung
-    /// lam ngon ao nhay. face &lt; 0: nhu ResolvePoint.</summary>
+    /// <summary>Like ResolvePoint, but a point INSIDE the box is always pushed out through the chosen `face`
+    /// (not the nearest face): near a box edge the nearest face flips between two faces every frame and the virtual
+    /// finger jumps. face &lt; 0: same as ResolvePoint.</summary>
     public bool ResolvePoint(Vector3 point, float radius, int face, out Vector3 resolved)
     {
         if (face < 0 || !(_collider is BoxCollider box)) return ResolvePoint(point, radius, out resolved);
@@ -493,25 +493,25 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         Vector3 half = box.size * 0.5f;
         Vector3 p = t.InverseTransformPoint(point) - box.center;
         bool inside = Mathf.Abs(p.x) <= half.x && Mathf.Abs(p.y) <= half.y && Mathf.Abs(p.z) <= half.z;
-        if (!inside) return ResolvePoint(point, radius, out resolved); // ben ngoai: diem gan nhat la duy nhat, khong nhay
+        if (!inside) return ResolvePoint(point, radius, out resolved); // outside: the nearest point is unique, no jumping
         int axis = face / 2;
         float sign = (face & 1) == 1 ? 1f : -1f;
-        float depth = (half[axis] - sign * p[axis]) * Mathf.Abs(t.lossyScale[axis]); // met tu diem toi mat da chot
+        float depth = (half[axis] - sign * p[axis]) * Mathf.Abs(t.lossyScale[axis]); // metres from the point to the chosen face
         resolved = point + FaceNormal(face) * (depth + radius);
         return true;
     }
 
-    /// <summary>Dau ngon cua tay DANG CAM (ho ra toi 3 cm hay lot vao) -> dat len be mat.
-    /// Hop: diem cham co dinh tren mat da chot luc cam.</summary>
+    /// <summary>A fingertip of the HOLDING hand (up to 3 cm away or inside) -> placed on the surface.
+    /// Box: the contact point is fixed on the face chosen at grab time.</summary>
     public bool TryGetHeldContact(Transform dataTip, Vector3 visualTip, out Vector3 contact)
     {
         contact = visualTip;
         if (!IsHoldingTip(dataTip)) return false;
         int finger = _hands[_heldBy].thumbTip == dataTip ? 0 : 1;
         int face = _heldFace[finger];
-        // Hop: dang cam la ngon NAM TREN MAT, du tay that (nhieu tracking) ho ra bao xa -- viec
-        // tha do UpdateHeld quyet dinh (mo ngon ro rang du _releaseDelay). Truoc day ho > 3 cm la
-        // ngon ao mo theo roi khung sau lai hut vao -> ngon cai dong mo lien tuc.
+        // Box: while held the finger SITS ON THE FACE however far the real (noisy) hand drifts away; releasing is
+        // UpdateHeld's job (a clear opening for _releaseDelay). Previously a gap over 3 cm let the virtual finger open
+        // and then snap back the next frame -> the thumb kept opening and closing.
         if (face < 0 && SkinDistance(visualTip) > 0.03f) return false;
         contact = face >= 0
             ? _collider.transform.TransformPoint(_heldPoint[finger]) + FaceNormal(face) * _fingerRadius
