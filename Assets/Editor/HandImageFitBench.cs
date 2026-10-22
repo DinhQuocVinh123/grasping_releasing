@@ -2,17 +2,17 @@ using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 
-/// <summary>Chay thu HandImageFit trong Editor (khong can kinh): ban tay gia lap co dap an dung,
-/// chieu len camera + nhieu -> do sai so va so lan "nhay". Goi tu Unity RunCommand:
-/// HandImageFitBench.Synthetic(3f, 8f).</summary>
+/// <summary>Tests HandImageFit in the Editor (no headset needed): a simulated hand with a known answer is projected into a
+/// camera with noise -> measures the error and the number of "jumps". Also replays real recordings and retargets bare-hand
+/// recordings. Call from a Unity RunCommand, e.g. HandImageFitBench.Synthetic(3f, 8f). The returned reports are in Vietnamese.</summary>
 public static class HandImageFitBench
 {
     private static System.Random _rng;
-    /// <summary>Vi tri / phap tuyen cum luc giac (he co tay) cho Replay; zero = uoc luong tu rig.</summary>
+    /// <summary>Hexagon plate position / normal (wrist frame) for Replay; zero = estimated from the rig.</summary>
     public static Vector3 DorsalPoint, DorsalNormal;
-    /// <summary>Replay: tai anh so ForceFid, dat dap an = (ForceP, ForceR, ForceA) truoc khi giai (0 = tat).</summary>
+    /// <summary>Replay: at image ForceFid, set the answer to (ForceP, ForceR, ForceA) before solving (0 = off).</summary>
     public static int ForceFid;
-    public static float HandScale; // >0: kich thuoc tay ao nhu tren kinh (cot hscale)
+    public static float HandScale; // >0: virtual hand size as on the headset (hscale column)
     public static Vector3 ForceP;
     public static Quaternion ForceR;
     public static float[] ForceA;
@@ -38,7 +38,7 @@ public static class HandImageFitBench
         return true;
     }
 
-    /// <summary>Nhu tren nhung du 5 ngon + diem phia long ban tay -- de dung mo hinh co cum luc giac.</summary>
+    /// <summary>Like BuildModel but with all 5 fingers + the palm-side point, to build the model with the hexagon plate.</summary>
     public static bool BuildFull(out Transform wrist, out FingerChainFitter[] fitters, out Vector3 palmT)
     {
         wrist = null; fitters = null; palmT = Vector3.zero;
@@ -143,11 +143,11 @@ public static class HandImageFitBench
         return sb.ToString();
     }
 
-    /// <summary>Chay lai ban ghi that. Moi dong file: t, fid, 9 diem pixel (x,y), 9 do tin cay, vi tri + huong
-    /// mat (thay cho camera), co tay Quest (vi tri + huong). Camera gan dung: tieu cu fx, tam anh giua.
-    /// Gia lap hien thi 60 Hz (truot muot nhu ImageHandSolver) de dem so lan nhay giong glove_diag.
-    /// outPath: ghi 9 diem ket qua chieu len anh (pixel) cho tung anh -- de ve len anh kiem tra.</summary>
-    /// File co them 4 cot cuoi (tuy chon): cum luc giac 1/0, x, y (pixel), dien tich.
+    /// <summary>Replays a real recording. Each line: t, fid, 9 pixel points (x, y), 9 confidences, eye position + rotation
+    /// (standing in for the camera), Quest wrist (position + rotation). Approximate camera: focal length fx, principal point at the centre.
+    /// Simulates a 60 Hz display (smoothed like ImageHandSolver) to count jumps like glove_diag.
+    /// outPath: writes the 9 result points projected into the image (pixels) for each image, to draw over the image for checking.
+    /// The file may have 4 extra columns at the end: hexagon plate 1/0, x, y (pixels), area.</summary>
     public static string Replay(string path, string outPath, bool useDorsal = true, bool useQuestRot = false,
                                 float fx = 950f, float width = 1280f, float height = 960f)
     {
@@ -166,7 +166,7 @@ public static class HandImageFitBench
         float cx = width * 0.5f, cy = height * 0.5f;
         float lastSolve = -999f, depthPrior = 0f, lastT = 0f; bool hasDepth = false, hasRot = false;
         Quaternion rotPrior = Quaternion.identity;
-        // hien thi
+        // display
         Vector3 dP = Vector3.zero; Quaternion dR = Quaternion.identity; var dA = new float[8]; bool hasDisp = false;
         Vector3 prevDP = Vector3.zero; Quaternion prevDR = Quaternion.identity; var prevDA = new float[8];
         int frames = 0, jumpP = 0, jumpR = 0, jumpA = 0, solves = 0, fails = 0;
@@ -180,7 +180,7 @@ public static class HandImageFitBench
             double tAbs = double.Parse(c[0], inv);
             if (li == 0) t0 = tAbs;
             float t = (float)(tAbs - t0);
-            // hien thi 60 Hz tu anh truoc toi anh nay
+            // 60 Hz display from the previous image up to this one
             while (tDisp < t)
             {
                 if (fit.HasSolution && hasDisp && tDisp - lastSolve <= 1f)
@@ -212,7 +212,7 @@ public static class HandImageFitBench
                 w[i] = sc >= 0.2f ? (i == 1 ? 0.5f : 1f) : 0f;
             }
             float since = t - lastT;
-            float z = Vector3.Dot(rw - camPos, camRot * Vector3.forward) + 0.03f; // tam tay xa hon co tay chut
+            float z = Vector3.Dot(rw - camPos, camRot * Vector3.forward) + 0.03f; // the hand centre is a little further than the wrist
             depthPrior = !hasDepth || since > 2f ? z : Mathf.Lerp(depthPrior, z, 1f - Mathf.Exp(-since / 0.6f));
             rotPrior = !hasRot || since > 1f ? rq : Quaternion.Slerp(rotPrior, rq, 1f - Mathf.Exp(-since / 0.3f));
             hasDepth = hasRot = true;
@@ -256,7 +256,7 @@ public static class HandImageFitBench
                 Quaternion fr = fit.Rotation;
                 foreach (float v in new[] { fr.x, fr.y, fr.z, fr.w, rq.x, rq.y, rq.z, rq.w, fit.Depth, depthPrior, t, fit.Position.x, fit.Position.y, fit.Position.z })
                     o.Append(',').Append(v.ToString("F5", inv));
-                // Goc ngon giua + goc ngon ut cua tay ao (khong co trong 9 diem) -> ve mat long ban tay
+                // Middle and little finger bases of the virtual hand (not among the 9 points) -> to draw the palm
                 fit.TryGetDorsalPoint(out Vector3 dWorld);
                 foreach (Vector3 wpt in new[] { fit.Position + fit.Rotation * midL, fit.Position + fit.Rotation * pinkyL, dWorld })
                 {
@@ -264,13 +264,13 @@ public static class HandImageFitBench
                     o.Append(',').Append((cx + q.x / q.z * fx).ToString("F1", inv)).Append(',').Append((cy - q.y / q.z * fx).ToString("F1", inv));
                 }
                 o.Append(',').Append(dorsal).Append(',').Append(dpx.ToString("F1", inv)).Append(',').Append(dpy.ToString("F1", inv));
-                // 9 khop trong he camera (met) -- de ve goc nhin ngang
+                // The 9 joints in the camera frame (m), to draw a side view
                 for (int i = 0; i < 9; i++)
                 {
                     Vector3 q = ci * (pts[i] - camPos);
                     o.Append(',').Append(q.x.ToString("F4", inv)).Append(',').Append(q.y.ToString("F4", inv)).Append(',').Append(q.z.ToString("F4", inv));
                 }
-                // 3 ngon giua/ap ut/ut (dang nam) chieu len anh -- de ve ca ban tay ao
+                // The middle / ring / little fingers (curled) projected into the image, to draw the whole virtual hand
                 for (int f = 2; f < 5; f++)
                 {
                     Transform rb = fitters[f].RootBone;
@@ -294,10 +294,10 @@ public static class HandImageFitBench
             Med(depthDiff) * 100, P(depthDiff, 0.9f) * 100, frames, frames / 60f, jumpP, jumpR, jumpA, fit.Switches);
     }
 
-    /// <summary>Chuyen dang tay TRAN (HandPoseRecorder, Quest theo doi) sang goc khop cua tay gang ao: moi khung
-    /// tim 4 goc ngon cai + 4 goc ngon tro sao cho HUONG tung dot trung voi tay Quest (khong phu thuoc co tay to
-    /// nho). Tay trai -> lat truc X (ngon cai/tro o +X tay trai, -X tay phai). Ghi: t, 8 goc, sai lech huong
-    /// trung binh tung ngon (do), khoang cach 2 dau ngon (m).</summary>
+    /// <summary>Converts BARE-hand poses (HandPoseRecorder, Quest-tracked) to the glove hand's joint angles: per frame, finds the
+    /// 4 thumb + 4 index angles so that the DIRECTION of each segment matches the Quest hand (independent of hand size).
+    /// Left hand -> mirror X (thumb/index are on +X for the left hand, -X for the right). Writes: t, 8 angles, mean direction
+    /// error per finger (degrees), distance between the two fingertips (m).</summary>
     public static string RetargetQuest(string path, string outPath, string hand = "L")
     {
         if (!BuildFull(out Transform wrist, out var fitters, out _)) return "khong tim thay FingerUDPReceiver";
@@ -343,7 +343,7 @@ public static class HandImageFitBench
                     for (int k = 0; k < 3; k++) s += (j[k + 1] - j[k]).normalized == Vector3.zero ? 0f : ((j[k + 1] - j[k]).normalized - target[k]).sqrMagnitude;
                     return s;
                 }
-                // Giam dan theo tung goc (toa do), buoc nho dan -- 4 an, du nhanh cho vai nghin khung
+                // Coordinate descent over each angle with a shrinking step -- 4 unknowns, fast enough for a few thousand frames
                 float[] x = a[f];
                 float cost = Cost(x), step = 8f;
                 for (int it = 0; it < 60 && step > 0.05f; it++)
