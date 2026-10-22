@@ -1,36 +1,35 @@
 using UnityEngine;
 
 /// <summary>
-/// Giai đoạn 2 (Bước 5) — giữ tham chiếu đến các xương ngón tay trong
-/// model bàn tay ảo, tự động tìm theo tên (không cần kéo thủ công).
-/// Chưa xoay gì cả ở bước này — chỉ dựng khung để Bước 6 (test bằng
-/// sine giả) và sau này (dữ liệu cảm biến thật) cắm dữ liệu vào.
+/// Holds references to the finger bones of the virtual hand model, found automatically by name
+/// (no manual drag-and-drop needed). It does not move anything itself: FingerUDPReceiver and
+/// HandImageFitBench read these bones to pose the glove hand.
 ///
-/// Gắn script này vào GameObject StaticHandModel_Right.
+/// Put it on the hand model's GameObject (StaticHandModel_Right).
 /// </summary>
 public class HandFingerRig : MonoBehaviour
 {
-    [Header("Ngón cái (3 đốt)")]
+    [Header("Thumb (3 bones)")]
     public Transform thumbMetacarpal;
     public Transform thumbProximal;
     public Transform thumbDistal;
 
-    [Header("Ngón trỏ (3 khớp cử động)")]
+    [Header("Index (3 moving joints)")]
     public Transform indexProximal;
     public Transform indexIntermediate;
     public Transform indexDistal;
 
-    [Header("Ngón giữa")]
+    [Header("Middle")]
     public Transform middleProximal;
     public Transform middleIntermediate;
     public Transform middleDistal;
 
-    [Header("Ngón áp út")]
+    [Header("Ring")]
     public Transform ringProximal;
     public Transform ringIntermediate;
     public Transform ringDistal;
 
-    [Header("Ngón út")]
+    [Header("Little")]
     public Transform pinkyProximal;
     public Transform pinkyIntermediate;
     public Transform pinkyDistal;
@@ -40,7 +39,7 @@ public class HandFingerRig : MonoBehaviour
         AutoFindMissingBones();
     }
 
-    /// <summary>Tự tìm các xương còn thiếu (chưa gán tay) theo đúng tên trong model.</summary>
+    /// <summary>Finds any bone not assigned by hand, using its exact name in the model.</summary>
     [ContextMenu("Auto Find Bones")]
     public void AutoFindMissingBones()
     {
@@ -60,7 +59,7 @@ public class HandFingerRig : MonoBehaviour
         ringIntermediate = ringIntermediate ? ringIntermediate : FindDeepChild(transform, "XRHand_RingIntermediate");
         ringDistal       = ringDistal       ? ringDistal       : FindDeepChild(transform, "XRHand_RingDistal");
 
-        // Model gốc đặt tên ngón út là "Little" (theo chuẩn XRHand), không phải "Pinky".
+        // The model names the little finger "Little" (XRHand convention), not "Pinky".
         pinkyProximal     = pinkyProximal     ? pinkyProximal     : FindDeepChild(transform, "XRHand_LittleProximal");
         pinkyIntermediate = pinkyIntermediate ? pinkyIntermediate : FindDeepChild(transform, "XRHand_LittleIntermediate");
         pinkyDistal       = pinkyDistal       ? pinkyDistal       : FindDeepChild(transform, "XRHand_LittleDistal");

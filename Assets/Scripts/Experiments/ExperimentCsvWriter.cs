@@ -5,12 +5,12 @@ using System.Text;
 using UnityEngine;
 
 /// <summary>
-/// Ghi 1 file CSV, moi dong ghi xuong dia NGAY (flush) -- neu ung dung bi tat
-/// giua chung thi nhung luot da xong van con nguyen trong file.
+/// Writes one CSV file and flushes every row to disk IMMEDIATELY, so finished trials survive if the app
+/// is closed halfway through.
 ///
-/// File nam trong Application.persistentDataPath/Experiments/. Tren Quest la:
-///   /sdcard/Android/data/&lt;ten goi ung dung&gt;/files/Experiments/
-/// Lay ve may tinh bang: adb pull /sdcard/Android/data/&lt;ten goi&gt;/files/Experiments .
+/// Files go to Application.persistentDataPath/Experiments/. On the Quest that is:
+///   /sdcard/Android/data/&lt;package name&gt;/files/Experiments/
+/// Copy them to the PC with: adb pull /sdcard/Android/data/&lt;package name&gt;/files/Experiments .
 /// </summary>
 public sealed class ExperimentCsvWriter : IDisposable
 {
@@ -50,7 +50,7 @@ public sealed class ExperimentCsvWriter : IDisposable
             case double d: return d.ToString("0.#####", CultureInfo.InvariantCulture);
             case bool b: return b ? "1" : "0";
             default:
-                // Dau phay trong chu se lam lech cot -> thay bang ';'
+                // A comma inside text would shift the columns -> replace it with ';'
                 return Convert.ToString(value, CultureInfo.InvariantCulture).Replace(',', ';').Replace('\n', ' ');
         }
     }

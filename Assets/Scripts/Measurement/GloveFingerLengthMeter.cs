@@ -2,48 +2,55 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Do chieu dai tung dot ngon cai + ngon tro KHI DEO GANG, tu chinh he thong gang (21/10) -- dau vao cho mo hinh luc.
-/// FingerLengthMeter (tay tran, hand tracking Quest) chi ra ban tay MAU phong to/thu nho (chieu dai / scale khong doi
-/// tren 8018 khung, 20/10), nen khong do duoc ti le rieng tung ngon.
+/// Measures the thumb and index finger lengths WHILE WEARING THE GLOVE, using the glove system itself.
+/// The lengths are inputs to the actuator force model F(P, L, L0, s).
 ///
-/// Moi anh co ket qua tu Python:
-///   1. 9 diem model gang (gang2010) tren anh: co tay, ngon cai 1-4, ngon tro 5-8 (FingerUDPReceiver).
-///   2. Tia tu camera LUC CHUP qua tung diem (GloveLiveStreamer.TryGetFrameRay -- dung tieu cu + huong camera).
-///   3. Khoang cach toi tay = tam tay THEO QUEST luc chup (goi y vi tri, theo truc nhin camera) -- doc lap voi model.
-///      KHONG dung chieu sau cua ImageHandSolver: bo giai tu dat co tay theo ban tay mau -> do lai chi ra co mau.
-///   4. Coi ban tay phang, quay ve camera, o khoang cach do: tia cat mat phang -> diem 3D; khoang cach 2 diem lien
-///      nhau = chieu dai dot. Chi lay anh du 9 diem ro, khong sat mep, ngon DUOI THANG (ngon nghieng/gap trong ngan hon).
-///   5. Phan vi 90 (p90) qua cac anh dat -> hien trong kinh + ghi Application.persistentDataPath/glove_finger_lengths_*.csv
-///      (tools/glove_finger_lengths.py tom tat, so voi thuoc). p90 vi ngon nghieng chi lam ngan tren anh.
-///      Chi so TONG (khop dot -> dau ngon) dang tin; tung dot theo cho khop giua duoc doan luc gan nhan (gang che khop).
-///      Ngon cai giu tu nhien thi cheo ve camera -> ngan hon that ~10% (21/10): xoay tay cho mong ngon cai quay ve camera.
+/// For every image result from Python:
+///   1. The glove model's 9 image points: wrist, thumb 1-4, index 5-8 (FingerUDPReceiver).
+///   2. A ray from the camera AT CAPTURE TIME through each point (GloveLiveStreamer.TryGetFrameRay, which uses
+///      the camera's focal length and pose).
+///   3. Distance to the hand = the Quest's hand centre at capture time, along the camera's view axis
+///      (independent of the model). ImageHandSolver's depth is NOT used: it places the wrist using the template
+///      hand size, so it would just measure the template back.
+///   4. Treat the hand as a flat plane facing the camera at that distance: ray-plane intersection -> 3D point;
+///      the distance between neighbouring points = segment length. Only frames with all 9 points clear, away from
+///      the image edge, and the finger STRAIGHT are used (a tilted or bent finger looks shorter).
+///   5. The 90th percentile (p90) over the accepted frames is shown in the headset and written to
+///      Application.persistentDataPath/glove_finger_lengths_*.csv (summarised by tools/glove_finger_lengths.py).
+///      p90 because a tilted finger only ever looks SHORTER in the image, never longer.
+///      Only the TOTAL (knuckle -> tip) is reliable: the glove hides the middle joints, so the split between
+///      segments follows how the training images were labelled.
+///      A relaxed thumb points diagonally towards the camera and reads about 10% short: rotate the hand so the
+///      thumbnail faces the camera.
 ///
-/// Do tren GANG: dau ngon = dau nap gang, khop = cho model doan tren mat gang (theo nhan 20/10). Sai so khoang cach
-/// cua Quest khi deo gang (vai cm) -> sai bay nhieu % chieu dai: so voi thuoc truoc khi dung.
-/// Huong dan do: deo gang, gio tay truoc mat, mu (hoac long) ban tay quay ve mat, ngon cai + tro duoi thang, giu ~20 s.
+/// On the GLOVE: tip = end of the glove finger, joints = where the model places them on the glove surface.
+/// The Quest's distance error with the glove on (a few cm) becomes the same percentage error in length:
+/// compare with a ruler before using the numbers.
+/// How to measure: glove on, hand in front of the face, back (or palm) of the hand facing the eyes, thumb and
+/// index straight, hold for about 20 s.
 /// </summary>
-[DefaultExecutionOrder(450)] // sau FingerUDPReceiver (0): ImageHandSolver da lay ket qua anh moi trong khung nay
+[DefaultExecutionOrder(450)] // after FingerUDPReceiver (0): ImageHandSolver has taken this frame's new image result
 public class GloveFingerLengthMeter : MonoBehaviour
 {
-    [Tooltip("De trong = tu tim trong scene.")]
+    [Tooltip("Empty = find in the scene.")]
     [SerializeField] private FingerUDPReceiver _receiver;
     [SerializeField] private GloveLiveStreamer _streamer;
-    [Tooltip("Chu hien trung vi trong kinh. De trong = chi ghi file.")]
+    [Tooltip("Text in the headset showing the result. Empty = write the file only.")]
     [SerializeField] private TMPro.TextMeshPro _display;
     [SerializeField] private bool _logToFile = true;
 
-    [Header("Chi lay anh tot")]
-    [Tooltip("Do tin cay toi thieu cua MOI diem dung de do (model gui ve).")]
+    [Header("Only use good frames")]
+    [Tooltip("Minimum confidence of EVERY point used (sent by the model).")]
     [SerializeField] private float _minConfidence = 0.5f;
-    [Tooltip("Diem cach mep anh it hon khoang nay (ti le anh) thi bo anh -- model doan chu khong nhin thay.")]
+    [Tooltip("Drop the frame if a point is closer than this to the image edge (fraction of the image): the model guesses there instead of seeing.")]
     [SerializeField] private float _edgeMargin = 0.05f;
-    [Tooltip("Ngon coi la duoi thang khi cac dot lech huong nhau it hon goc nay (do). Ngon gap -> chieu dai tren anh ngan hon.")]
+    [Tooltip("A finger counts as straight when its segments differ in direction by less than this (degrees). A bent finger looks shorter.")]
     [SerializeField] private float _maxBendDegrees = 20f;
-    [Tooltip("Khoang cach hop le toi tay (met).")]
+    [Tooltip("Valid distance to the hand (m).")]
     [SerializeField] private Vector2 _depthRange = new Vector2(0.15f, 0.9f);
     [SerializeField] private int _maxSamples = 2000;
 
-    private const int Points = HandImageFit.Points; // 0 co tay, 1-4 ngon cai, 5-8 ngon tro
+    private const int Points = HandImageFit.Points; // 0 wrist, 1-4 thumb, 5-8 index
     private static readonly string[] Names =
     {
         "cai_dot1(MCP-IP)", "cai_dot2(IP-dau)", "cai_MCP-dau",
@@ -93,7 +100,7 @@ public class GloveFingerLengthMeter : MonoBehaviour
                 _uv[i].y < _edgeMargin || _uv[i].y > 1f - _edgeMargin) return;
         if (!_streamer.TryGetFramePose(fid, out Pose cam) || !_streamer.TryGetFrameHint(fid, out Vector3 center, out _)) return;
 
-        // Mat phang ban tay: vuong goc truc nhin camera, qua tam tay theo Quest luc chup
+        // Hand plane: perpendicular to the camera's view axis, through the Quest's hand centre at capture time
         Vector3 fwd = cam.rotation * Vector3.forward;
         float z = Vector3.Dot(center - cam.position, fwd);
         if (z < _depthRange.x || z > _depthRange.y) return;
@@ -105,7 +112,7 @@ public class GloveFingerLengthMeter : MonoBehaviour
             _p[i] = ray.origin + ray.direction * (z / along);
         }
 
-        // Ngon cai: 2 -> 3 -> 4 (khop dot -> khop gan dau -> dau); ngon tro: 5 -> 6 -> 7 -> 8
+        // Thumb: 2 -> 3 -> 4 (knuckle -> joint near the tip -> tip); index: 5 -> 6 -> 7 -> 8
         float thumbBend = Bend(2, 3, 4), indexBend = Mathf.Max(Bend(5, 6, 7), Bend(6, 7, 8));
         bool thumbOk = thumbBend <= _maxBendDegrees, indexOk = indexBend <= _maxBendDegrees;
         float t1 = Mm(2, 3), t2 = Mm(3, 4), i1 = Mm(5, 6), i2 = Mm(6, 7), i3 = Mm(7, 8);
@@ -114,7 +121,7 @@ public class GloveFingerLengthMeter : MonoBehaviour
         if (_logToFile) WriteRow(fid, z, thumbBend, indexBend, thumbOk, indexOk, t1, t2, i1, i2, i3);
     }
 
-    /// <summary>Goc lech huong (do) giua doan a->b va b->c: 0 = thang hang.</summary>
+    /// <summary>Change of direction (degrees) between segment a->b and b->c: 0 = in a straight line.</summary>
     private float Bend(int a, int b, int c) => Vector3.Angle(_p[b] - _p[a], _p[c] - _p[b]);
 
     private float Mm(int a, int b) => Vector3.Distance(_p[a], _p[b]) * 1000f;
@@ -135,7 +142,7 @@ public class GloveFingerLengthMeter : MonoBehaviour
                 "glove_finger_lengths_" + System.DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
             _log = new System.IO.StreamWriter(path, false, new System.Text.UTF8Encoding(false));
             _log.WriteLine("t,fid,depth_m,thumb_bend_deg,index_bend_deg,thumb_ok,index_ok," + string.Join(",", Names));
-            Debug.Log($"[GloveFingerLengthMeter] Ghi chieu dai ngon (gang, mm) vao {path}", this);
+            Debug.Log($"[GloveFingerLengthMeter] Writing glove finger lengths (mm) to {path}", this);
         }
         _log.WriteLine(string.Join(",",
             Time.realtimeSinceStartup.ToString("F3", inv), fid.ToString(inv), z.ToString("F4", inv),
@@ -145,9 +152,9 @@ public class GloveFingerLengthMeter : MonoBehaviour
         if (Time.frameCount % 72 == 0) _log.Flush();
     }
 
-    /// <summary>Phan vi p (0..1) cua cot k. Dung p90 lam chieu dai: ngon nghieng ve / ra khoi camera chi lam NGAN di
-    /// tren anh (khong bao gio dai ra), nen cac anh dai nhat gan that nhat. Buoi 21/10 11:47: ngon tro trung vi 85.1,
-    /// p90 90.4 mm, thuoc 90 mm (+0.4%).</summary>
+    /// <summary>Percentile p (0..1) of column k. p90 is used as the length: a finger tilted towards / away from the
+    /// camera only looks SHORTER in the image (never longer), so the longest frames are closest to the truth.
+    /// First session: index median 85.1, p90 90.4 mm, ruler 90 mm (+0.4%).</summary>
     private static float Percentile(List<float[]> list, int k, float p)
     {
         var a = new float[list.Count];
@@ -158,8 +165,8 @@ public class GloveFingerLengthMeter : MonoBehaviour
 
     private string Summary()
     {
-        // Chi so TONG (khop dot -> dau ngon) dang tin: 2 dau mut de thay tren gang. Tung dot phu thuoc cho khop giua
-        // duoc DOAN luc gan nhan (khop bi gang che) -> chi de tham khao.
+        // Only the TOTAL (knuckle -> tip) is reliable: both end points are easy to see on the glove. Single segments depend
+        // on where the middle joints were GUESSED when labelling (the glove hides them), so they are for reference only.
         string s = $"DO NGON (GANG) -- {_seen} anh, dat: cai {_thumb.Count} / tro {_index.Count}";
         if (_thumb.Count >= 10)
             s += $"\n Cai: MCP-dau {Percentile(_thumb, 2, 0.9f):F1} mm  (trung vi {Percentile(_thumb, 2, 0.5f):F1})" +

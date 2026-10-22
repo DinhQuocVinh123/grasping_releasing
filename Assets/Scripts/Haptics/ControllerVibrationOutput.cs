@@ -1,41 +1,39 @@
 using UnityEngine;
 
 /// <summary>
-/// "Gang gia" bang RUNG TAY CAM Quest -- de cam nhan tin hieu haptic TRUOC
-/// khi gang that san sang. Cam tay cam o tay kia (hoac buoc vao co tay) trong
-/// khi bop vat bang tay tran: Palmer et al. (IROS 2022) cho thay chuyen phan
-/// hoi cua ngon cai/tro sang co tay van giup lam viec tot hon khong co gi.
+/// Haptic output through the Quest CONTROLLER's vibration, to feel the haptic signals before the real glove
+/// is ready. Hold the controller in the other hand (or strap it to the wrist) while squeezing with the bare
+/// hand: Palmer et al. (IROS 2022) showed that moving thumb/index feedback to the wrist still works better
+/// than no feedback.
 ///
-/// Can bat "Simultaneous Hands And Controllers" (OVRManager) va Hand Tracking
-/// Support = Controllers And Hands -- neu khong, cam tay cam len la Quest tat
-/// theo doi tay.
+/// Needs "Simultaneous Hands And Controllers" (OVRManager) and Hand Tracking Support = Controllers And Hands;
+/// otherwise the Quest stops tracking hands as soon as a controller is picked up.
 ///
-/// Gioi han cua tay cam so voi gang: chi co 1 motor cho CA 2 ngon (lay ngon
-/// manh hon), va motor phan hoi cham nen xung qua ngan (vai chuc ms) duoc
-/// keo dai toi _minTransientSeconds de con cam nhan duoc.
+/// Limits compared with the glove: one motor for BOTH fingers (the stronger finger wins), and the motor
+/// responds slowly, so very short pulses (tens of ms) are stretched to _minTransientSeconds to be felt.
 /// </summary>
-[DefaultExecutionOrder(300)] // sau HapticRenderer (150): gui lenh rung sau khi da co du lieu khung nay
+[DefaultExecutionOrder(300)] // after HapticRenderer (150): vibrate once this frame's data is ready
 public class ControllerVibrationOutput : MonoBehaviour, IHapticGlove
 {
     public enum Target { Left, Right, Both }
 
     [SerializeField] private Target _controller = Target.Right;
 
-    [Header("Lực liên tục")]
-    [Tooltip("Luc lien tuc duoc nhan voi so nay truoc khi rung -- de rung nen yeu hon xung cham, xung cham moi noi bat.")]
+    [Header("Continuous force")]
+    [Tooltip("The continuous force is multiplied by this before vibrating, so the background vibration is weaker than touch pulses and the pulses stand out.")]
     [Range(0f, 1f)]
     [SerializeField] private float _pressureGain = 0.6f;
-    [Tooltip("Luc duoi muc nay thi khong rung (tranh rung rat nhe lien tuc khi ngon chi hoi sat be mat).")]
+    [Tooltip("No vibration below this force (avoids a constant faint buzz when the finger is just next to the surface).")]
     [Range(0f, 0.5f)]
     [SerializeField] private float _pressureDeadzone = 0.05f;
-    [Tooltip("Tan so rung nen cho luc lien tuc (0..1 cua dai tan so tay cam).")]
+    [Tooltip("Vibration frequency for the continuous force (0..1 of the controller's range).")]
     [Range(0f, 1f)]
     [SerializeField] private float _pressureFrequency = 0.3f;
 
-    [Header("Xung sự kiện")]
-    [Tooltip("Xung ngan hon muc nay duoc keo dai ra -- motor tay cam can thoi gian de quay.")]
+    [Header("Event pulses")]
+    [Tooltip("Pulses shorter than this are stretched: the controller motor needs time to spin up.")]
     [SerializeField] private float _minTransientSeconds = 0.06f;
-    [Tooltip("Tan so (Hz) ung voi muc cao nhat cua tay cam, de doi tan so xung (Hz) sang thang 0..1.")]
+    [Tooltip("Frequency (Hz) that maps to the controller's top setting, to convert pulse frequency (Hz) to 0..1.")]
     [SerializeField] private float _maxControllerHz = 320f;
 
     private readonly float[] _pressure = new float[2];
@@ -52,8 +50,8 @@ public class ControllerVibrationOutput : MonoBehaviour, IHapticGlove
 
     public void PlayTransient(HapticFinger finger, HapticEventType type, HapticTransient transient)
     {
-        // Xung moi chi thay xung cu neu no manh hon phan con lai cua xung cu
-        // (2 ngon cung phat Grab trong 1 khung -> khong bi dem 2 lan).
+        // A new pulse only replaces the current one if it is stronger than what is left of it
+        // (both fingers sending Grab in the same frame must not count twice).
         if (transient.amplitude < CurrentTransientEnvelope()) return;
 
         _transientAmplitude = transient.amplitude;
@@ -67,7 +65,7 @@ public class ControllerVibrationOutput : MonoBehaviour, IHapticGlove
         if (_transientStart < 0f) return 0f;
         float t = Time.time - _transientStart;
         if (t >= _transientDuration) return 0f;
-        // Tat dan theo ham mu, ve ~5% o cuoi xung
+        // Exponential decay, down to about 5% at the end of the pulse
         return _transientAmplitude * Mathf.Exp(-3f * t / _transientDuration);
     }
 
@@ -80,7 +78,7 @@ public class ControllerVibrationOutput : MonoBehaviour, IHapticGlove
         float amplitude = Mathf.Max(continuous, transient);
         float frequency = transient > continuous ? _transientFrequency01 : _pressureFrequency;
 
-        // Chi gui lenh khi dang rung, hoac 1 lan de TAT khi vua het rung.
+        // Only send while vibrating, plus once to turn it OFF when it has just stopped.
         if (amplitude > 0f || _wasVibrating) Vibrate(frequency, amplitude);
         _wasVibrating = amplitude > 0f;
     }

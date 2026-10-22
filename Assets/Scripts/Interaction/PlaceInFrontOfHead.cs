@@ -3,27 +3,27 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 
 /// <summary>
-/// Dat object nay truoc mat nguoi dung roi de NGUYEN DO trong the gioi ao
-/// (khong di theo dau). Dung lam cho "nha" (_home) cua vat bop duoc: vat
-/// nam yen o day, bi cam thi di theo tay, tha ra thi bay ve day.
+/// Places this object in front of the user, then leaves it FIXED in the world (it does not follow the head).
+/// Used as the "home" (_home) of the squeezable objects: the object rests here, follows the hand while held,
+/// and flies back here when released.
 ///
-/// Can dat luc chay vi kinh dung goc toa do o SAN (Floor Level) -- dat san
-/// trong Editor thi khong biet nguoi dung cao bao nhieu, dung o dau.
+/// This has to happen at run time because the headset puts the origin on the FLOOR (Floor Level): in the
+/// Editor we cannot know how tall the user is or where they stand.
 ///
-/// Dat lai: nut B (tay cam phai), hoac phim R khi chay trong Editor.
+/// Re-place: B button (right controller), or R while running in the Editor.
 /// </summary>
 public class PlaceInFrontOfHead : MonoBehaviour
 {
-    [Tooltip("Dau nguoi dung (CenterEyeAnchor).")]
+    [Tooltip("The user's head (CenterEyeAnchor).")]
     [SerializeField] private Transform _head;
-    [Tooltip("Vi tri so voi dau (met): x = sang phai, y = cao/thap, z = ra xa (tinh theo huong nhin ngang).")]
+    [Tooltip("Position relative to the head (m): x = right, y = up, z = forward (along the horizontal view direction).")]
     [SerializeField] private Vector3 _offset = new Vector3(0f, -0.15f, 0.35f);
-    [Tooltip("Doi bao lau sau khi mo ung dung moi dat lan dau (kinh can vai khung hinh moi co vi tri dau).")]
+    [Tooltip("Wait this long after the app starts before the first placement (the headset needs a few frames to know the head pose).")]
     [SerializeField] private float _startDelay = 0.5f;
     [SerializeField] private bool _recenterWithButton = true;
-    [Tooltip("Cac vat duoc dua NGAY ve cho moi (khong bay tu tu) moi khi dat lai.")]
+    [Tooltip("Objects moved to their new home INSTANTLY (not flying back) on every re-place.")]
     [SerializeField] private SquishyPinchable[] _snapObjects;
-    [Tooltip("Vat dung physics (PhysicsPinchGrabbable) dua ve cho cu moi khi dat lai.")]
+    [Tooltip("Physics objects (PhysicsPinchGrabbable) put back at their home on every re-place.")]
     [SerializeField] private PhysicsPinchGrabbable[] _snapBodies;
 
     private IEnumerator Start()
@@ -46,7 +46,7 @@ public class PlaceInFrontOfHead : MonoBehaviour
     {
         if (_head == null) return;
 
-        // Chi lay huong nhin NGANG: cui dau luc bam cung khong dat vat xuong dat
+        // Horizontal view direction only: looking down while pressing must not put the object on the floor
         Vector3 forward = Vector3.ProjectOnPlane(_head.forward, Vector3.up);
         if (forward.sqrMagnitude < 1e-4f) forward = Vector3.forward;
         forward.Normalize();

@@ -1,25 +1,24 @@
 using UnityEngine;
 
 /// <summary>
-/// Tin hieu thi giac khi BOP QUA MUC: vat do dan len theo muc ngon THAT da
-/// an vuot qua do lun toi da cua vat.
+/// Visual cue for SQUEEZING TOO HARD: the object turns red as the REAL fingers press past the object's
+/// maximum compression.
 ///
-/// Vi FingertipSurfaceConstraint giu ngon AO tren be mat, nguoi dung khong
-/// thay ngon THAT da lot vao trong vat bao sau. Prachyabrued &amp; Borst (IEEE
-/// TVCG 2016): nguoi dung THICH cach giu ngon ao tren be mat, nhung nen kem
-/// them tin hieu cho biet ngon that dang o dau -- script nay la tin hieu do.
-/// Tat component nay de so sanh co / khong co tin hieu.
+/// FingertipSurfaceConstraint keeps the VIRTUAL fingers on the surface, so the user cannot see how deep the
+/// real fingers have gone into the object. Prachyabrued &amp; Borst (IEEE TVCG 2016): users prefer virtual
+/// fingers held on the surface, but it helps to add a cue that shows where the real fingers are. This script
+/// is that cue. Disable the component to compare with and without it.
 ///
-/// Gan cung object voi SquishyPinchable.
+/// Put it on the same object as SquishyPinchable.
 /// </summary>
 [DefaultExecutionOrder(300)]
 [RequireComponent(typeof(SquishyPinchable))]
 public class SqueezeCueTint : MonoBehaviour
 {
     [SerializeField] private Color _cueColor = new Color(0.9f, 0.1f, 0.1f);
-    [Tooltip("Ngon that vuot qua muc lun toi da bao nhieu (met) thi vat do HAN.")]
+    [Tooltip("How far (m) the real fingers must go past the maximum compression for the object to be fully red.")]
     [SerializeField] private float _overshootForFullCue = 0.01f;
-    [Tooltip("Mau vat chi do toi muc nay (0..1) -- de van con nhan ra mau goc.")]
+    [Tooltip("The colour only blends up to this amount (0..1), so the original colour stays recognisable.")]
     [Range(0f, 1f)]
     [SerializeField] private float _maxBlend = 0.8f;
 
@@ -30,7 +29,7 @@ public class SqueezeCueTint : MonoBehaviour
     private MaterialPropertyBlock _block;
     private Color _baseColor;
 
-    /// <summary>Muc tin hieu hien tai 0..1.</summary>
+    /// <summary>Current cue level, 0..1.</summary>
     public float Cue01 { get; private set; }
 
     private void Awake()

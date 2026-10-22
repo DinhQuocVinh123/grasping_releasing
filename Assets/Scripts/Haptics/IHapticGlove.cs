@@ -1,31 +1,31 @@
 using UnityEngine;
 
-/// <summary>Ngon co bo phat haptic tren gang (gang dang lam chi co ngon cai + tro).</summary>
+/// <summary>Fingers that have a haptic actuator on the glove (the current glove has thumb and index only).</summary>
 public enum HapticFinger
 {
     Thumb = 0,
     Index = 1,
 }
 
-/// <summary>Cac su kien tiep xuc. Moi su kien kem 1 xung rung ngan (transient).</summary>
+/// <summary>Contact events. Each event comes with one short vibration pulse (a transient).</summary>
 public enum HapticEventType
 {
-    Touch,    // da ngon vua cham be mat vat
-    Untouch,  // da ngon vua roi khoi be mat
-    Grab,     // vat vua dinh vao tay (bop tu 2 phia)
-    Release,  // vat vua duoc tha ra
+    Touch,    // fingertip has just touched the object's surface
+    Untouch,  // fingertip has just left the surface
+    Grab,     // object is now held (squeezed from both sides)
+    Release,  // object has just been let go
 }
 
-/// <summary>Mot xung rung ngan: dao dong tat dan, kieu
-/// bien_do * e^(-t/thoi_gian) * sin(2*pi*tan_so*t). Driver cua tung loai gang
-/// tu quyet dinh tai tao the nao cho hop voi phan cung cua no.</summary>
+/// <summary>A short vibration pulse, a decaying sine:
+/// amplitude * e^(-t / duration) * sin(2 * pi * frequency * t).
+/// Each glove driver decides how to reproduce it on its own hardware.</summary>
 [System.Serializable]
 public struct HapticTransient
 {
     [Range(0f, 1f)] public float amplitude;
-    [Tooltip("Tan so (Hz). Thap = cham em/mem, cao = cham gat/cung.")]
+    [Tooltip("Frequency (Hz). Low = soft contact, high = hard contact.")]
     public float frequencyHz;
-    [Tooltip("Thoi gian (giay) de xung tat dan.")]
+    [Tooltip("Time (s) for the pulse to decay.")]
     public float durationSeconds;
 
     public HapticTransient(float amplitude, float frequencyHz, float durationSeconds)
@@ -40,20 +40,19 @@ public struct HapticTransient
 }
 
 /// <summary>
-/// "O cam" chung cho MOI thiet bi haptic: gang that (sau nay), rung tay cam
-/// Quest, bang debug... HapticRenderer chi noi chuyen voi interface nay, nen
-/// khi gang san sang chi can viet 1 class moi implement no -- khong phai dong
-/// vao phan tinh toan.
+/// Common interface for every haptic device: the glove, the Quest controller vibration, the debug output.
+/// HapticRenderer only talks to this interface, so a new device only needs a new class that implements it,
+/// without touching the force computation.
 ///
-/// Hai loai tin hieu, theo Kuchenbecker et al. (IEEE TVCG 2006): luc LIEN TUC
-/// theo do lun, cong XUNG NGAN luc bat dau cham -- chi co luc lien tuc thi vat
-/// ao cam giac nhu xop, them xung thi that hon han.
+/// Two kinds of signal, after Kuchenbecker et al. (IEEE TVCG 2006): a CONTINUOUS force that follows the
+/// penetration depth, plus a SHORT PULSE at the moment of contact. With the continuous force alone a
+/// virtual object feels spongy; adding the pulse makes it feel much more real.
 /// </summary>
 public interface IHapticGlove
 {
-    /// <summary>Goi MOI KHUNG HINH. 0 = khong cham, 1 = luc toi da.</summary>
+    /// <summary>Called EVERY FRAME. 0 = no contact, 1 = maximum force.</summary>
     void SetPressure(HapticFinger finger, float pressure01);
 
-    /// <summary>Goi 1 lan khi co su kien tiep xuc.</summary>
+    /// <summary>Called once per contact event.</summary>
     void PlayTransient(HapticFinger finger, HapticEventType type, HapticTransient transient);
 }

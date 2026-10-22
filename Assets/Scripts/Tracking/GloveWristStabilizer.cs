@@ -2,73 +2,71 @@ using Oculus.Interaction.Input;
 using UnityEngine;
 
 /// <summary>
-/// On dinh CO TAY cua tay gang do Quest theo doi -- chen vao CHUOI DU LIEU tay
-/// cua Meta (giong HandFilter / LastKnownGoodHand cua Interaction SDK), nen moi
-/// thu doc tay nay (HandVisual, bong, goi y vi tri cho Python) deu nhan cung vi
-/// tri da on dinh.
+/// Stabilises the WRIST of the glove hand as tracked by the Quest. It sits inside Meta's hand DATA CHAIN
+/// (like the Interaction SDK's HandFilter / LastKnownGoodHand), so everything that reads this hand (HandVisual,
+/// the squeezable objects, the hand-position hint sent to Python) gets the same stabilised pose.
 ///
-/// Vi sao can: gang moi (day deo den + tam luc giac tren mu ban tay) lam Quest
-/// nhan hinh ban tay kem: co tay dung yen vai khung roi NHAY 5-12 cm, xoay dot
-/// ngot 20-60 do (do bang glove_diag 30/09: nhay >3 cm 190 lan/phut, gang cu 10).
+/// Why: with the glove on (black straps and a hexagon plate on the back of the hand) the Quest recognises the
+/// hand poorly: the wrist stays still for a few frames, then JUMPS 5-12 cm or turns 20-60 degrees at once
+/// (measured: jumps over 3 cm about 190 times per minute, versus about 10 with the earlier glove).
 ///
-/// Cach lam:
-///   1. Nhay XA hon muc tay that co the di trong khoang thoi gian do (toc do
-///      toi da _maxSpeed) hoac Quest bao do tin cay thap -> nghi ngo: GIU vi tri
-///      cu, khong nhay theo.
-///   2. Nghi ngo nhung Quest bao cung 1 cho moi lien tuc _confirmFrames khung ->
-///      tay that da o do (vd vung tay nhanh) -> nhan, va TRUOT toi do trong
-///      _reacquireSeconds thay vi nhay.
-///   3. Rung nho: loc One Euro (Casiez 2012; ban cua Meta).
-///   4. Quest mat tay ngan (< _holdSeconds): giu dang tay cuoi cung.
+/// How:
+///   1. A jump FURTHER than a real hand could move in that time (maximum speed _maxSpeed), or low Quest
+///      confidence -> suspect: KEEP the old pose instead of following it.
+///   2. Suspect, but the Quest reports the same new place for _confirmFrames frames in a row -> the real hand
+///      is there (e.g. a fast swing) -> accept it, and GLIDE there over _reacquireSeconds instead of jumping.
+///   3. Small jitter: One Euro filter (Casiez 2012; Meta's implementation).
+///   4. Short tracking loss (&lt; _holdSeconds): keep the last hand pose.
 ///
-/// Gan len 1 GameObject; _iModifyDataFromSourceMono = SyntheticHandData cua tay
-/// phai, Update Mode = After Previous Step, Update After = SyntheticHandData.
-/// HandVisual cua tay gang tro vao component nay thay vi SyntheticHandData.
+/// Setup: put it on a GameObject; _iModifyDataFromSourceMono = the right hand's SyntheticHandData,
+/// Update Mode = After Previous Step, Update After = SyntheticHandData.
+/// The glove hand's HandVisual points at this component instead of SyntheticHandData.
 /// </summary>
 public class GloveWristStabilizer : Hand
 {
-    [Header("Chong nhay")]
-    [Tooltip("Toc do toi da cua tay that (m/s). Co tay nhay xa hon toc do nay cho phep -> coi la loi tracking.")]
+    [Header("Jump rejection")]
+    [Tooltip("Maximum speed of the real hand (m/s). A wrist jump further than this allows is treated as a tracking error.")]
     [SerializeField] private float _maxSpeed = 2.5f;
-    [Tooltip("Cong them vao nguong nhay (m) -- rung binh thuong khong bi coi la nhay.")]
+    [Tooltip("Added to the jump threshold (m), so normal jitter is not treated as a jump.")]
     [SerializeField] private float _jumpMargin = 0.015f;
-    [Tooltip("Toc do xoay toi da cua co tay (do/giay).")]
+    [Tooltip("Maximum wrist rotation speed (degrees/s).")]
     [SerializeField] private float _maxAngularSpeed = 400f;
     [SerializeField] private float _rotationMargin = 6f;
-    [Tooltip("Vi tri moi phai lap lai lien tuc bay nhieu khung (cach nhau < _confirmRadius) moi duoc nhan.")]
+    [Tooltip("A new position must repeat for this many frames in a row (within _confirmRadius) to be accepted.")]
     [SerializeField] private int _confirmFrames = 3;
     [SerializeField] private float _confirmRadius = 0.02f;
     [SerializeField] private float _confirmAngle = 15f;
-    [Tooltip("Khi nhan vi tri moi sau khi giu: truot toi do trong khoang nay (giay) thay vi nhay.")]
+    [Tooltip("When a new position is accepted after holding: glide to it over this time (s) instead of jumping.")]
     [SerializeField] private float _reacquireSeconds = 0.15f;
-    [Tooltip("Quest mat tay ngan hon muc nay (giay) thi giu dang tay cuoi cung.")]
+    [Tooltip("If the Quest loses the hand for less than this (s), keep the last hand pose.")]
     [SerializeField] private float _holdSeconds = 0.5f;
 
-    [Header("Loc rung (One Euro)")]
+    [Header("Jitter filter (One Euro)")]
     [SerializeField] private float _minCutoff = 1.5f;
     [SerializeField] private float _beta = 0.5f;
 
-    /// <summary>So khung dang GIU (bo qua du lieu Quest) -- de chan doan.</summary>
+    /// <summary>Number of frames HELD (Quest data ignored), for diagnostics.</summary>
     public int HeldFrames { get; private set; }
     public int Reacquires { get; private set; }
 
-    /// <summary>Co tay Quest THO (truoc moi buoc chong nhay / loc o day), toa do the gioi, lan Quest cap nhat gan nhat --
-    /// de do Quest nhin tay deo gang tre va rung bao nhieu (glove_diag cot qrx..). RawValid = khung do Quest dang theo doi tay.</summary>
+    /// <summary>RAW Quest wrist (before any rejection / filtering here), world space, from the latest Quest update.
+    /// Used to measure how late and how jittery the Quest sees the gloved hand (glove_diag columns qrx..).
+    /// RawValid = the Quest was tracking the hand in that frame.</summary>
     public Pose RawWorldRoot { get; private set; }
     public bool RawValid { get; private set; }
     public bool RawHighConfidence { get; private set; }
-    /// <summary>Time.realtimeSinceStartup luc nhan du lieu tho gan nhat.</summary>
+    /// <summary>Time.realtimeSinceStartup when the latest raw data arrived.</summary>
     public float RawTime { get; private set; }
 
     private readonly HandDataAsset _last = new HandDataAsset();
     private IOneEuroFilter<Vector3> _posFilter;
     private IOneEuroFilter<Quaternion> _rotFilter;
     private bool _has, _hasCandidate;
-    private Pose _accepted;          // vi tri Quest cuoi cung duoc tin
-    private float _sinceAccepted;    // giay tu lan tin cuoi
+    private Pose _accepted;          // last trusted Quest pose
+    private float _sinceAccepted;    // seconds since the last trusted pose
     private Pose _candidate;
     private int _candidateCount;
-    private Vector3 _glidePos;       // lech con lai sau khi nhan vi tri moi (giam dan ve 0)
+    private Vector3 _glidePos;       // remaining offset after accepting a new pose (decays to 0)
     private Quaternion _glideRot = Quaternion.identity;
     private Pose _out;
     private float _lostTime;
@@ -85,7 +83,7 @@ public class GloveWristStabilizer : Hand
         float dt = Mathf.Max(Time.deltaTime, 1e-4f);
         RecordRaw(data);
 
-        // Quest mat tay: giu dang cuoi cung mot chut (tranh tay ao chop tat)
+        // Quest lost the hand: keep the last pose for a moment (avoids the virtual hand flickering)
         if (!data.IsDataValid || !data.IsTracked)
         {
             _lostTime += dt;
@@ -118,7 +116,7 @@ public class GloveWristStabilizer : Hand
             return;
         }
 
-        // 1. Du lieu nay co tin duoc khong?
+        // 1. Can this data be trusted?
         _sinceAccepted += dt;
         float jump = Vector3.Distance(raw.position, _accepted.position);
         float turn = Quaternion.Angle(raw.rotation, _accepted.rotation);
@@ -129,7 +127,7 @@ public class GloveWristStabilizer : Hand
         bool accept = !suspect;
         if (suspect && data.IsHighConfidence)
         {
-            // 2. Quest cu bao cung 1 cho moi -> tay that da o do
+            // 2. The Quest keeps reporting the same new place -> the real hand is there
             if (_hasCandidate && Vector3.Distance(raw.position, _candidate.position) < _confirmRadius &&
                 Quaternion.Angle(raw.rotation, _candidate.rotation) < _confirmAngle)
                 _candidateCount++;
@@ -156,7 +154,7 @@ public class GloveWristStabilizer : Hand
             target = raw;
             if (reacquire)
             {
-                // Bat dau truot: giu nguyen vi tri dang hien, lech giam dan ve 0
+                // Start gliding: keep the pose currently shown, the offset decays to 0
                 Vector3 f = _posFilter.Step(raw.position, dt);
                 Quaternion fr = _rotFilter.Step(raw.rotation, dt);
                 _glidePos = _out.position - f;
@@ -167,15 +165,15 @@ public class GloveWristStabilizer : Hand
         }
         else
         {
-            target = _accepted; // giu cho cu
+            target = _accepted; // hold the old pose
             HeldFrames++;
         }
 
         Output(data, target.position, target.rotation, dt, alreadyFiltered: false);
     }
 
-    /// <summary>Ghi co tay Quest tho (chi chan doan, khong doi du lieu). data.Root la toa do tracking -> doi sang the gioi
-    /// bang chinh TrackingToWorldTransformer cua khung du lieu nay (nhu Hand.GetRootPose).</summary>
+    /// <summary>Stores the raw Quest wrist (diagnostics only, the data is not changed). data.Root is in tracking space ->
+    /// converted to world with this frame's own TrackingToWorldTransformer (like Hand.GetRootPose).</summary>
     private void RecordRaw(HandDataAsset data)
     {
         RawValid = data.IsDataValid && data.IsTracked;

@@ -5,19 +5,19 @@ using Oculus.Interaction.Input;
 using UnityEngine;
 
 /// <summary>
-/// Ghi lai cach Quest theo doi ban tay TRAN (khop nao xoay bao nhieu, cac khop di cung nhau ra sao) de
-/// hoc dang tay tu nhien cho tay gang ao (ImageHandSolver). Moi khung tay dang duoc theo doi: 1 dong CSV
-/// voi vi tri + huong cua 26 khop (bo khop OpenXR) TINH TU CO TAY, khong phu thuoc mo hinh tay hien thi.
+/// Records how the Quest tracks the BARE hand (how far each joint rotates, which joints move together) so the
+/// glove hand (ImageHandSolver) can learn natural hand poses. One CSV row per tracked frame, with the position
+/// and rotation of the 26 OpenXR joints RELATIVE TO THE WRIST, independent of the displayed hand model.
 ///
-/// File: Application.persistentDataPath/hand_pose_*.csv. Lay ve: adb pull /sdcard/Android/data/[ten goi]/files/
-/// Nho TAT (_record) sau khi ghi xong -- moi khung ghi ~2 KB.
+/// File: Application.persistentDataPath/hand_pose_*.csv. Copy with: adb pull /sdcard/Android/data/[package]/files/
+/// Turn _record OFF when done: each frame writes about 2 KB.
 /// </summary>
 [DefaultExecutionOrder(1000)]
 public sealed class HandPoseRecorder : MonoBehaviour
 {
-    [Tooltip("BAT de ghi. Chi ghi khung co tay dang duoc Quest theo doi.")]
+    [Tooltip("ON = record. Only frames where the Quest is tracking the hand are written.")]
     [SerializeField] private bool _record = true;
-    [Tooltip("Cac HandVisual can ghi (moi tay 1 cot 'hand'). De trong = tu tim tay trai (OVRHandVisualLeft) va tay phai (tay gang, lay du lieu Quest goc).")]
+    [Tooltip("HandVisuals to record (one 'hand' column each). Empty = find the left hand (OVRHandVisualLeft) and the right glove hand (raw Quest data).")]
     [SerializeField] private HandVisual[] _hands;
 
     private System.IO.StreamWriter _file;
@@ -30,11 +30,11 @@ public sealed class HandPoseRecorder : MonoBehaviour
         var list = new List<HandVisual>();
         foreach (var hv in FindObjectsByType<HandVisual>(FindObjectsInactive.Exclude))
         {
-            // Tay trai Quest hien thi (OVRHandVisualLeft) va tay gang (co FingerUDPReceiver -> Hand = du lieu Quest goc)
+            // The displayed Quest left hand (OVRHandVisualLeft) and the glove hand (has FingerUDPReceiver -> Hand = raw Quest data)
             if (hv.name == "OVRHandVisualLeft" || hv.GetComponent<FingerUDPReceiver>() != null) list.Add(hv);
         }
         _hands = list.ToArray();
-        Debug.Log($"[HandPoseRecorder] Ghi {_hands.Length} tay", this);
+        Debug.Log($"[HandPoseRecorder] Recording {_hands.Length} hand(s)", this);
     }
 
     private void LateUpdate()
@@ -81,7 +81,7 @@ public sealed class HandPoseRecorder : MonoBehaviour
             head.Append($",{n}_x,{n}_y,{n}_z,{n}_qx,{n}_qy,{n}_qz,{n}_qw");
         }
         _file.WriteLine(head.ToString());
-        Debug.Log($"[HandPoseRecorder] Ghi vao {path}", this);
+        Debug.Log($"[HandPoseRecorder] Writing to {path}", this);
     }
 
     private void OnDisable()

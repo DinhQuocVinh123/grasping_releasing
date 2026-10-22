@@ -1,33 +1,31 @@
 using UnityEngine;
 
 /// <summary>
-/// Bao luc bang MAU DAU NGON: dau ngon cai / ngon tro cua tay AO chuyen tu
-/// do nhat sang do dam khi an cang chat; khong cham thi khong hien gi.
-/// Thay cho 2 thanh luc (HapticBarsDisplay): tin hieu nam ngay cho tiep xuc,
-/// khong phai liec sang cho khac. To mau ngon tay la mot trong cac tin hieu
-/// thi giac Prachyabrued &amp; Borst da thiet ke va danh gia cho cam nam trong
-/// VR (IEEE TVCG 2016).
+/// Shows force as FINGERTIP COLOUR: the virtual thumb / index tip goes from light red to deep red as the
+/// finger presses harder; nothing is shown without contact. The cue sits right at the contact point, so the
+/// user does not have to look elsewhere. Colouring the fingers is one of the visual cues Prachyabrued &amp;
+/// Borst designed and evaluated for grasping in VR (IEEE TVCG 2016).
 ///
-/// Moi dau ngon co 1 "chop" mau trong suot bam theo dau ngon AO (sau khi
-/// FingertipSurfaceConstraint da giu ngon tren be mat vat).
+/// Each fingertip gets a transparent coloured cap that follows the VIRTUAL fingertip (after
+/// FingertipSurfaceConstraint has kept the finger on the object's surface).
 ///
-/// Gan cung object voi HapticRenderer cua ban tay do va keo vao o Outputs
-/// cua no (giong cac dau ra IHapticGlove khac).
+/// Put it on the same object as that hand's HapticRenderer and add it to the renderer's Outputs
+/// (like any other IHapticGlove output).
 /// </summary>
-[DefaultExecutionOrder(350)] // sau FingertipSurfaceConstraint (200): dat chop dung cho dau ngon da duoc day ra be mat
+[DefaultExecutionOrder(350)] // after FingertipSurfaceConstraint (200): place the cap on the fingertip already pushed to the surface
 public class FingertipColorCue : MonoBehaviour, IHapticGlove
 {
-    [Tooltip("Goc cua ban tay AO (vd OVRHandVisualLeft, StaticHandModel_Right). Dau ngon duoc tim theo ten XRHand_ThumbTip / XRHand_IndexTip, lay bo xuong dang BAT.")]
+    [Tooltip("Root of the VIRTUAL hand (e.g. OVRHandVisualLeft, StaticHandModel_Right). Tips are found by the names XRHand_ThumbTip / XRHand_IndexTip, in the ACTIVE skeleton.")]
     [SerializeField] private Transform _handRoot;
-    [Tooltip("Material TRONG SUOT (URP Unlit, Surface = Transparent). Mau do script dat qua _BaseColor.")]
+    [Tooltip("A TRANSPARENT material (URP Unlit, Surface = Transparent). The script sets the colour via _BaseColor.")]
     [SerializeField] private Material _material;
-    [Tooltip("Ban kinh chop mau (met). Lon hon da ngon mot chut de trum len dau ngon.")]
+    [Tooltip("Cap radius (m). Slightly larger than the fingertip so it covers it.")]
     [SerializeField] private float _radius = 0.011f;
-    [Tooltip("Luc vua cham (gan 0): do nhat, mo.")]
+    [Tooltip("Just touching (force near 0): light, faint red.")]
     [SerializeField] private Color _lightColor = new Color(1f, 0.55f, 0.55f, 0.35f);
-    [Tooltip("Luc toi da (1): do dam, ro.")]
+    [Tooltip("Maximum force (1): deep, solid red.")]
     [SerializeField] private Color _deepColor = new Color(0.7f, 0f, 0f, 0.9f);
-    [Tooltip("Moi su kien (cham, cam...) loe sang thoang qua de van thay duoc ca khi luc rat nho.")]
+    [Tooltip("Every event (touch, grab...) flashes briefly, so it is visible even when the force is very small.")]
     [SerializeField] private float _flashSeconds = 0.15f;
 
     private static readonly string[] TipNames = { "XRHand_ThumbTip", "XRHand_IndexTip" };
@@ -53,10 +51,10 @@ public class FingertipColorCue : MonoBehaviour, IHapticGlove
         {
             var cap = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             cap.name = "ColorCue_" + TipNames[f];
-            // PHAI xoa NGAY (DestroyImmediate), khong dung Destroy: Destroy chi
-            // chay cuoi khung hinh, trong luc do FirstPersonLocomotor (trong
-            // camera rig) do mat dat luc khoi dong, THAY collider nay, tuong la
-            // co san -> bat trong luc; collider bien mat -> nguoi choi roi mai.
+            // MUST be removed IMMEDIATELY (DestroyImmediate), not with Destroy: Destroy only runs at the end of
+            // the frame, and meanwhile FirstPersonLocomotor (in the camera rig) probes for the ground at start-up,
+            // finds this collider, takes it for the floor and turns gravity on; when the collider disappears the
+            // player falls forever.
             DestroyImmediate(cap.GetComponent<Collider>());
             cap.transform.SetParent(transform, false);
             var renderer = cap.GetComponent<Renderer>();
@@ -77,7 +75,7 @@ public class FingertipColorCue : MonoBehaviour, IHapticGlove
 
             float flash = _flashStart[f] >= 0f
                 ? 1f - Mathf.Clamp01((Time.time - _flashStart[f]) / Mathf.Max(_flashSeconds, 1e-3f))
-                : 0f; // 1 = vua loe, 0 = het
+                : 0f; // 1 = just flashed, 0 = over
             bool show = tip != null && (_pressure[f] > 0.001f || flash > 0f);
             cap.enabled = show;
             if (!show) continue;
@@ -94,8 +92,8 @@ public class FingertipColorCue : MonoBehaviour, IHapticGlove
         }
     }
 
-    /// <summary>Tim lai neu bo xuong dang dung bi tat -- HandVisual co the doi
-    /// giua 2 bo xuong (OpenXR / Oculus) luc chay.</summary>
+    /// <summary>Finds the tip again if the skeleton in use was deactivated: HandVisual can switch between
+    /// two skeletons (OpenXR / Oculus) at run time.</summary>
     private Transform FindTip(int f)
     {
         if (_tips[f] != null && _tips[f].gameObject.activeInHierarchy) return _tips[f];

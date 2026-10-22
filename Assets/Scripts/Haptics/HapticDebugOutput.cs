@@ -1,16 +1,16 @@
 using UnityEngine;
 
 /// <summary>
-/// "Gang gia" don gian nhat: nhan tin hieu haptic va hien ra de kiem tra --
-/// luc hien tai tung ngon (xem trong Inspector luc Play) va ghi moi su kien
-/// ra Console. Khong can phan cung gi.
+/// The simplest haptic output: no hardware, it just shows the haptic signals so they can be checked.
+/// The current pressure of each finger is visible in the Inspector during Play, and every contact
+/// event is written to the Console.
 /// </summary>
 public class HapticDebugOutput : MonoBehaviour, IHapticGlove
 {
-    [Tooltip("Ghi moi su kien (cham/roi/cam/tha) ra Console.")]
+    [Tooltip("Write every event (touch / untouch / grab / release) to the Console.")]
     [SerializeField] private bool _logEvents = true;
 
-    [Header("Chỉ đọc (xem trong Play mode)")]
+    [Header("Read only (watch in Play mode)")]
     [Range(0f, 1f)] [SerializeField] private float _thumbPressure;
     [Range(0f, 1f)] [SerializeField] private float _indexPressure;
     [SerializeField] private int _eventCount;
