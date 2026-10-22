@@ -5,20 +5,31 @@ PC relay between Unity (Quest, over Wi-Fi) and the Arduino Mega (over USB).
     Quest --UDP 5011--> this PC --USB serial--> Arduino Mega
     Quest <--UDP 5012-- this PC
 
-Unity's GloveForceEsp32Output needs no change: this relay answers it exactly
-like the two Wi-Fi boards would (it announces itself on UDP 5012 as both the
-thumb and the index board), so Unity finds the PC by itself.
+This relay answers Unity's GloveForceEsp32Output exactly like the two Wi-Fi boards
+would (it announces itself on UDP 5012 as both the thumb and the index board),
+so Unity finds the PC by itself.
+
+Dorsal actuators: Unity sends the dorsal torque T and the actuator length L per
+finger. The relay turns T into the wanted actuator force (T / --dorsal-arm) and
+runs the empirical actuator force model backwards (tools/dorsal_pressure.py,
+tools/actuator_model) to get the actuator PRESSURE that makes that force at that
+length. The Arduino turns pressure into stepper position.
+Unity sends L unclamped; this relay clamps it to the range the model file was
+calibrated for (model.length_domain_mm), so a refit model needs no Unity change.
+The status line shows "92>80" when that clamp is active.
 
 To the Arduino it sends one text line, RATE times per second (default 50):
 
-    G,<seq>,<thP>,<thU>,<thV>,<thT>,<ixP>,<ixU>,<ixV>,<ixT>*<cs>
+    H,<seq>,<thP>,<thU>,<thV>,<thBar>,<ixP>,<ixU>,<ixV>,<ixBar>*<cs>
 
-per finger: P pressing force (N), U/V tilt (N), T dorsal extension torque (N*m);
+per finger: P pressing force on the pad (N), U/V tilt (N), Bar target pressure of
+the dorsal actuator (bar; --rest-bar = no force, lower = more force);
 cs = XOR of every character before '*', two hex digits. Parsed on the Arduino
-by arduino/GloveSerialLink/GloveSerialLink.h.
+by arduino/GloveSerialLink/GloveSerialLink.h. (The old torque line started with
+'G'; an old sketch ignores 'H' lines and stays at rest instead of misreading them.)
 
 Safety: if Unity has been silent for --timeout seconds (default 0.2), the relay
-sends ZEROS -- the line keeps flowing, so the Arduino keeps hearing "no force".
+sends REST (no pad force, dorsal at rest pressure) -- the line keeps flowing.
 If the relay itself dies, nothing arrives; the Arduino must then go to rest on
 its own (GloveSerialLink.alive() turns false after 200 ms).
 
@@ -30,6 +41,7 @@ Usage
     python glove_serial_bridge.py --port COM5
     python glove_serial_bridge.py --dry-run            # no Arduino: show the lines instead
 Options: --baud 115200  --rate 50  --timeout 0.2  --log run.csv  --quiet
+         --dorsal-arm 0.012  --rest-bar 1.0  --model-dir tools/actuator_model
 """
 import argparse
 import math
@@ -38,36 +50,55 @@ import struct
 import sys
 import time
 
-CMD_PORT, TLM_PORT, PROTOCOL_VERSION = 5011, 5012, 2       # GloveEsp32Protocol.cs
-CMD_FLOATS, TLM_FLOATS = 14, 16
+CMD_PORT, TLM_PORT, PROTOCOL_VERSION = 5011, 5012, 3       # GloveEsp32Protocol.cs
+CMD_FLOATS, TLM_FLOATS = 16, 16
 FAULT_LINK_LOST = 1 << 4
 
 
 # ------------------------------------------------------------------ helpers
 def parse_unity(data):
-    """Unity's 56-byte packet -> (seq, trust, [thumb(P,U,V,T), index(P,U,V,T)]) or None."""
+    """Unity's 64-byte packet -> (seq, trust, [thumb(P,U,V,T,L), index(P,U,V,T,L)]) or None.
+    T dorsal torque (N*m), L dorsal actuator length (mm)."""
     if len(data) != CMD_FLOATS * 4:
         return None
     f = struct.unpack("<%df" % CMD_FLOATS, data)
-    if any(math.isnan(x) or math.isinf(x) for x in f) or round(f[13]) != PROTOCOL_VERSION or f[0] < 0:
+    if any(math.isnan(x) or math.isinf(x) for x in f) or round(f[15]) != PROTOCOL_VERSION or f[0] < 0:
         return None
     fingers = []
-    for base, tq in ((3, 11), (7, 12)):
-        fingers.append((max(f[base + 1], 0.0), f[base + 2], f[base + 3], max(f[tq], 0.0)))
+    for base in (3, 9):   # per finger: contact, P, U, V, T, L
+        fingers.append((max(f[base + 1], 0.0), f[base + 2], f[base + 3], max(f[base + 4], 0.0), f[base + 5]))
     return int(f[0]), min(max(f[2], 0.0), 1.0), fingers
 
 
-def make_line(seq, fingers):
-    body = "G,%d" % seq
-    for p, u, v, t in fingers:
-        body += ",%.4f,%.4f,%.4f,%.5f" % (p, u, v, t)
+def make_line(seq, pads, bars):
+    """pads: [(P, U, V)] per finger; bars: dorsal target pressure per finger."""
+    body = "H,%d" % seq
+    for (p, u, v), bar in zip(pads, bars):
+        body += ",%.4f,%.4f,%.4f,%.4f" % (p, u, v, bar)
     cs = 0
     for ch in body:
         cs ^= ord(ch)
     return "%s*%02X\n" % (body, cs)
 
 
-ZERO = [(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0)]
+ZERO = [(0.0, 0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0, 0.0)]   # Unity silent: no force at all
+
+
+def dorsal_targets(dp, fingers, arm_m):
+    """Per finger: (wanted force N, length used mm, target bar, branch)."""
+    out = []
+    for i, (_, _, _, torque, length) in enumerate(fingers):
+        force = torque / arm_m if arm_m > 0 else 0.0
+        bar, branch, used = dp.update(i, force, length)
+        out.append((force, used, bar, branch))
+    return out
+
+
+def fmt_length(sent, used):
+    """"80", or "92>80" when the model's range clamped what Unity sent."""
+    if isinstance(sent, float) and math.isfinite(sent) and abs(sent - used) < 0.5:
+        return "%.0f" % used
+    return "%s>%.0f" % (("%.0f" % sent) if isinstance(sent, float) and math.isfinite(sent) else "?", used)
 
 
 def open_serial(port, baud, reset_wait):
@@ -86,6 +117,10 @@ def open_serial(port, baud, reset_wait):
 
 # --------------------------------------------------------------------- main
 def run(args):
+    from dorsal_pressure import DorsalPressure, load_model
+    dp = DorsalPressure(load_model(args.model_dir), rest_bar=args.rest_bar)
+    print("force model %s: L %g-%g mm, rest %.2f bar, dorsal arm %.4f m" % (
+        dp.model.model_id, dp.l_min, dp.l_max, dp.rest_bar, args.dorsal_arm))
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -106,7 +141,8 @@ def run(args):
 
     log = open(args.log, "w") if args.log else None
     if log:
-        log.write("t,seq,fresh,thP,thU,thV,thT,ixP,ixU,ixV,ixT\n")
+        log.write("t,seq,fresh,thP,thU,thV,thT,thL_sent_mm,thL_used_mm,thF_N,thBar,thBranch,"
+                  "ixP,ixU,ixV,ixT,ixL_sent_mm,ixL_used_mm,ixF_N,ixBar,ixBranch\n")
 
     host, last_rx, arrival = None, -1e9, 0.0
     seq, trust, latest = 0, 0.0, ZERO
@@ -115,6 +151,7 @@ def run(args):
     next_send = next_tlm = next_status = time.time()
     rx_text = b""
     t0 = time.time()
+    dorsal = dorsal_targets(dp, ZERO, args.dorsal_arm)   # rest, until the first send
 
     try:
         while True:
@@ -145,7 +182,8 @@ def run(args):
                 next_send += period
                 if next_send < now:
                     next_send = now + period
-                line = make_line(seq, targets)
+                dorsal = dorsal_targets(dp, targets, args.dorsal_arm)
+                line = make_line(seq, [t[:3] for t in targets], [d[2] for d in dorsal])
                 if ser is not None:
                     try:
                         ser.write(line.encode("ascii"))
@@ -162,8 +200,10 @@ def run(args):
                     if not args.quiet and lines_sent % max(1, int(args.rate / 5)) == 0:
                         print("-> " + line.strip())
                 if log:
-                    log.write("%.4f,%d,%d,%s\n" % (now - t0, seq, int(fresh),
-                                                   ",".join("%.5f" % x for fv in targets for x in fv)))
+                    cols = []
+                    for t, (force, used, bar, branch) in zip(targets, dorsal):
+                        cols += ["%.5f" % x for x in t[:4]] + ["%.2f" % t[4], "%.2f" % used, "%.4f" % force, "%.4f" % bar, branch]
+                    log.write("%.4f,%d,%d,%s\n" % (now - t0, seq, int(fresh), ",".join(cols)))
 
             # ---- reconnect a lost port ---------------------------------------------------
             if ser is None and not args.dry_run and now >= next_open:
@@ -216,9 +256,11 @@ def run(args):
                 next_status = now + 0.5
                 link = ("Unity %s" % host) if fresh else ("Unity silent -> zeros" if host or packets else "waiting for Unity")
                 port = args.port if ser is not None else ("%s DOWN" % args.port)
-                print("\r[%s | %s] seq %d  thumb P %.2f T %.4f | index P %.2f T %.4f | %d lines   " % (
-                    link, port, seq, targets[0][0], targets[0][3], targets[1][0], targets[1][3], lines_sent),
-                    end="", flush=True)
+                d = dorsal
+                print("\r[%s | %s] seq %d  thumb P %.2f F %.2f L %s %.2fbar | index P %.2f F %.2f L %s %.2fbar%s | %d lines   " % (
+                    link, port, seq, targets[0][0], d[0][0], fmt_length(targets[0][4], d[0][1]), d[0][2],
+                    targets[1][0], d[1][0], fmt_length(targets[1][4], d[1][1]), d[1][2], " " + d[1][3][:3] if d[1][2] < dp.rest_bar else "",
+                    lines_sent), end="", flush=True)
 
             if args.seconds and now - t0 > args.seconds:
                 break
@@ -229,8 +271,9 @@ def run(args):
         # Last word: no force, a few times, so the glove goes to rest right away.
         if ser is not None:
             try:
+                rest = make_line(seq, [z[:3] for z in ZERO], [dp.rest_bar, dp.rest_bar])
                 for _ in range(10):
-                    ser.write(make_line(seq, ZERO).encode("ascii"))
+                    ser.write(rest.encode("ascii"))
                     time.sleep(0.02)
                 ser.close()
             except Exception:
@@ -259,6 +302,11 @@ def main():
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--broadcast", default="255.255.255.255", help="where to announce before Unity talks")
     ap.add_argument("--log", help="CSV of every line sent")
+    ap.add_argument("--dorsal-arm", type=float, default=0.012,
+                    help="moment arm (m) turning Unity's dorsal torque into actuator force; must match _dorsalGain")
+    ap.add_argument("--rest-bar", type=float, default=1.0,
+                    help="dorsal pressure meaning 'no force' (bar); must match P_REF_BAR in the Arduino sketch")
+    ap.add_argument("--model-dir", default=None, help="folder with actuator_force_model.py + coefficients (default tools/actuator_model)")
     ap.add_argument("--dry-run", action="store_true", help="no Arduino: print the lines")
     ap.add_argument("--list", action="store_true", help="list serial ports and exit")
     ap.add_argument("--quiet", action="store_true")

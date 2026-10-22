@@ -27,6 +27,9 @@ using Debug = UnityEngine.Debug;
 ///      surface normal and the pad normal disagree; the board turns its ANGLE into a shift of
 ///      the centre of pressure across the three chambers.
 ///   4. Dorsal torque: the extension torque F exerts about the finger's MCP joint.
+///   5. Dorsal actuator length L: rest length + offset x the finger's tracked flexion over the
+///      joints the actuator spans. The relay's force model (tools/actuator_model) needs it to
+///      turn the dorsal force into an actuator pressure.
 ///
 /// Runs after HapticRenderer (150, force for this frame) and FingertipSurfaceConstraint
 /// (200, real-pose cache for this frame). Put it on the glove hand, next to HapticRenderer.
@@ -72,6 +75,18 @@ public class GloveForceEsp32Output : MonoBehaviour
              "as a force that FLEXES the finger and the actuator gets nothing (seen on the index: face -0.9, T 0). " +
              "The dorsal actuator can only resist closing anyway. Off = only the extending part of the torque, as before.")]
     [SerializeField] private bool _dorsalIgnoresSign = true;
+
+    [Header("Dorsal actuator length L (for the relay's force model)")]
+    [Tooltip("Actuator length L (mm) with the finger STRAIGHT, in the units of the force model's tether setting. " +
+             "L is sent unclamped: the relay clamps it to whatever range the force model was calibrated for " +
+             "(55-80 mm for now), so a refit model with a wider range needs no change or rebuild here.")]
+    [SerializeField] private float _thumbDorsalRestLengthMm = 80f;
+    [SerializeField] private float _indexDorsalRestLengthMm = 80f;
+    [Tooltip("How much L grows per radian of finger flexion, mm/rad: the actuator runs along the back of the finger, " +
+             "about this far from each joint's axis, so bending a joint by theta stretches it by offset x theta. " +
+             "Summed over every joint from the dorsal joint to the tip. PLACEHOLDER: about the finger's half-thickness; " +
+             "calibrate by measuring L straight and in a pinch.")]
+    [SerializeField] private float _dorsalLengthPerRadMm = 10f;
 
     [Header("Scaling and limits")]
     [Tooltip("Multiplies the virtual force before anything else. 1 = the newtons HapticRenderer computes.")]
@@ -123,6 +138,10 @@ public class GloveForceEsp32Output : MonoBehaviour
         [Tooltip("-N.F/|F| while touching: 1 = pad square on the surface, below 0 = pad faces AWAY (flip it).")]
         public float facing;
         public float dorsalTorqueNm;
+        [Tooltip("Flexion summed over the joints the dorsal actuator spans (deg), from the tracked finger.")]
+        public float dorsalFlexDeg;
+        [Tooltip("Estimated dorsal actuator length L (mm), sent to the relay's force model.")]
+        public float dorsalLengthMm;
         [Tooltip("Preview of the board's split across chambers A, B, C (N).")]
         public Vector3 chamberN;
     }
@@ -333,7 +352,7 @@ public class GloveForceEsp32Output : MonoBehaviour
 
     private float _nextLiveLog;
 
-    /// <summary>Live readout for Logcat: "GLOVEF gate 1.00 w 1.00 fit 0.82 | TH touch 1 d 4.2mm F 0.95 P 0.36 T 0.0021 face 0.98 | IX ...".</summary>
+    /// <summary>Live readout for Logcat: "GLOVEF gate 1.00 w 1.00 fit 0.82 | TH touch 1 d 4.2mm F 0.95 P 0.36 T 0.0021 L 61.3mm face 0.98 | IX ...".</summary>
     private void LogLive()
     {
         if (_logcatHz <= 0f || Time.unscaledTime < _nextLiveLog) return;
@@ -354,6 +373,7 @@ public class GloveForceEsp32Output : MonoBehaviour
                .Append(" F ").Append(o.forceN.ToString("F2", inv))
                .Append(" P ").Append(o.pressN.ToString("F2", inv))
                .Append(" T ").Append(o.dorsalTorqueNm.ToString("F4", inv))
+               .Append(" L ").Append(o.dorsalLengthMm.ToString("F1", inv)).Append("mm")
                .Append(" face ").Append(o.facing.ToString("F2", inv));
         }
         _sb.Append(" | sent ").Append(_packetsSent);
@@ -425,11 +445,42 @@ public class GloveForceEsp32Output : MonoBehaviour
             o.dorsalTorqueNm = Mathf.Min(tau * _dorsalGain, _maxDorsalTorqueNm);
         }
 
+        o.dorsalFlexDeg = DorsalFlexionRad(chain, thumb) * Mathf.Rad2Deg;
+        // Not clamped here: the relay clamps L to the force model's calibrated range, so the range
+        // lives in one place (the model file) and follows the model when it is refit.
+        float restL = thumb ? _thumbDorsalRestLengthMm : _indexDorsalRestLengthMm;
+        float L = restL + _dorsalLengthPerRadMm * o.dorsalFlexDeg * Mathf.Deg2Rad;
+        o.dorsalLengthMm = float.IsNaN(L) || float.IsInfinity(L) ? restL : L;
+
         GloveEsp32Protocol.ChamberSplit(o.pressN, o.tiltN.x, o.tiltN.y, _split);
         o.chamberN = new Vector3(_split[0], _split[1], _split[2]);
 
         CheckFacing(f, s, o);
         _out[f] = o;
+    }
+
+    /// <summary>
+    /// Flexion summed over the joints the dorsal actuator spans: from the dorsal joint
+    /// (_thumbDorsalJoint / _indexDorsalJoint) to the last joint before the tip, measured on the
+    /// REAL tracked pose (before FingertipSurfaceConstraint bends the visible finger). The bone
+    /// before the first joint of the chain is its parent (Index: the metacarpal).
+    /// </summary>
+    private float DorsalFlexionRad(Transform[] chain, bool thumb)
+    {
+        int j0 = thumb ? _thumbDorsalJoint : _indexDorsalJoint;
+        bool flip = thumb ? _flipThumb : _flipIndex;
+        float sum = 0f;
+        for (int k = j0; k <= 2; k++)
+        {
+            Transform before = k > 0 ? chain[k - 1] : chain[0].parent;
+            if (before == null) continue;
+            Pose joint = FingertipSurfaceConstraint.TrackedPose(chain[k]);
+            Vector3 prev = FingertipSurfaceConstraint.TrackedPose(before).position;
+            Vector3 next = FingertipSurfaceConstraint.TrackedPose(chain[k + 1]).position;
+            Vector3 rigAxis = joint.rotation * (thumb ? Vector3.up : Vector3.right);
+            sum += GloveEsp32Protocol.FlexionRad(prev, joint.position, next, flip ? -rigAxis : rigAxis);
+        }
+        return float.IsNaN(sum) ? 0f : sum;
     }
 
     /// <summary>A pad normal pointing the wrong way does not fail loudly: P is just always
@@ -459,8 +510,6 @@ public class GloveForceEsp32Output : MonoBehaviour
         _cmd[GloveEsp32Protocol.CmdTrust] = _trust;
         WriteFinger(0, GloveEsp32Protocol.CmdThumbBase);
         WriteFinger(1, GloveEsp32Protocol.CmdIndexBase);
-        _cmd[GloveEsp32Protocol.CmdThumbTorque] = _out[0].dorsalTorqueNm;
-        _cmd[GloveEsp32Protocol.CmdIndexTorque] = _out[1].dorsalTorqueNm;
         _cmd[GloveEsp32Protocol.CmdVersion] = GloveEsp32Protocol.Version;
 
         Transmit();
@@ -469,10 +518,12 @@ public class GloveForceEsp32Output : MonoBehaviour
 
     private void WriteFinger(int f, int at)
     {
-        _cmd[at] = _out[f].touching ? 1f : 0f;
-        _cmd[at + 1] = _out[f].pressN;
-        _cmd[at + 2] = _out[f].tiltN.x;
-        _cmd[at + 3] = _out[f].tiltN.y;
+        _cmd[at + GloveEsp32Protocol.CmdContactOffset] = _out[f].touching ? 1f : 0f;
+        _cmd[at + GloveEsp32Protocol.CmdPressOffset] = _out[f].pressN;
+        _cmd[at + GloveEsp32Protocol.CmdTiltUOffset] = _out[f].tiltN.x;
+        _cmd[at + GloveEsp32Protocol.CmdTiltVOffset] = _out[f].tiltN.y;
+        _cmd[at + GloveEsp32Protocol.CmdTorqueOffset] = _out[f].dorsalTorqueNm;
+        _cmd[at + GloveEsp32Protocol.CmdLengthOffset] = _out[f].dorsalLengthMm;
     }
 
     private void SendZeros()
@@ -665,7 +716,7 @@ public class GloveForceEsp32Output : MonoBehaviour
             _cmdCsv.WriteLine("t_ms,seq,unity_time,trust,gate," +
                               "th_touch,th_F,th_P,th_tu,th_tv,th_tilt_deg,th_facing,th_torque,th_A,th_B,th_C," +
                               "ix_touch,ix_F,ix_P,ix_tu,ix_tv,ix_tilt_deg,ix_facing,ix_torque,ix_A,ix_B,ix_C," +
-                              "th_depth_mm,ix_depth_mm,solver_weight,fit_trust");
+                              "th_depth_mm,ix_depth_mm,solver_weight,fit_trust,th_L_mm,ix_L_mm");
             _tlmCsv = new StreamWriter(Path.Combine(_logDir, $"glove_esp32_tlm_{stamp}.csv"), false, Encoding.ASCII);
             _tlmCsv.WriteLine("t_ms,finger,ip,echo_seq,esp_time,faults,rtt_ms,echo_age_ms,trust," +
                               "tgt_A,meas_A,tgt_B,meas_B,tgt_C,meas_C,tgt_dorsal,meas_dorsal,press_N");
@@ -706,6 +757,8 @@ public class GloveForceEsp32Output : MonoBehaviour
         bool solver = _solver != null && _solver.isActiveAndEnabled;
         _sb.Append(',').Append(solver ? (_solver.Ready ? _solver.Weight : 0f).ToString("F3", inv) : "")
            .Append(',').Append(solver ? _solver.LastTrust.ToString("F3", inv) : "");
+        _sb.Append(',').Append(_out[0].dorsalLengthMm.ToString("F2", inv))
+           .Append(',').Append(_out[1].dorsalLengthMm.ToString("F2", inv));
         _cmdCsv.WriteLine(_sb.ToString());
     }
 

@@ -41,6 +41,33 @@ public static class Tests
         tau = GloveEsp32Protocol.ExtensionTorque(Vector3.zero, Vector3.right, new Vector3(0, 0, 0.09f), new Vector3(0, -2, 0));
         Check(tau == 0f, "a force that flexes the finger must give 0 extension torque, got " + tau);
 
+        // ---- 2b. dorsal actuator length from finger flexion ----
+        float straight = GloveEsp32Protocol.FlexionRad(new Vector3(0, 0, -1), Vector3.zero, new Vector3(0, 0, 1), Vector3.right);
+        Check(Near(straight, 0, 1e-5f), "straight joint must give 0 flexion, got " + straight);
+        Vector3 bentNext = Quaternion.AngleAxis(30, Vector3.right) * new Vector3(0, 0, 1);
+        float bent = GloveEsp32Protocol.FlexionRad(new Vector3(0, 0, -1), Vector3.zero, bentNext, Vector3.right);
+        Check(Near(bent, 30 * Mathf.Deg2Rad, 1e-4f), "30 deg flexion (toward the pad) must read +0.5236 rad, got " + bent);
+        float hyper = GloveEsp32Protocol.FlexionRad(new Vector3(0, 0, -1), Vector3.zero,
+                                                    Quaternion.AngleAxis(-10, Vector3.right) * new Vector3(0, 0, 1), Vector3.right);
+        Check(Near(hyper, -10 * Mathf.Deg2Rad, 1e-4f), "hyperextension must be negative, got " + hyper);
+        {
+            // Index bent 0 deg at the MCP, 30 at the PIP, 20 at the DIP -> 50 deg -> L = 80 + 10 mm/rad x 0.8727 = 88.73 mm before the 80 mm limit.
+            var hand = new GameObject("BentHand").transform;
+            var meta = Bone(hand, "XRHand_IndexMetacarpal", new Vector3(0, 0, -0.05f), Quaternion.identity);
+            var prox = Bone(meta, "XRHand_IndexProximal", Vector3.zero, Quaternion.identity);
+            Vector3 pip = new Vector3(0, 0, 0.045f);
+            Vector3 dip = pip + Quaternion.AngleAxis(30, Vector3.right) * new Vector3(0, 0, 0.025f);
+            Vector3 tipP = dip + Quaternion.AngleAxis(50, Vector3.right) * new Vector3(0, 0, 0.02f);
+            var chain = new[] { prox, Bone(prox, "XRHand_IndexIntermediate", pip, Quaternion.identity),
+                                Bone(prox, "XRHand_IndexDistal", dip, Quaternion.identity), Bone(prox, "XRHand_IndexTip", tipP, Quaternion.identity) };
+            var probe = new GameObject("Probe").AddComponent<GloveForceEsp32Output>();
+            float flex = (float)probe.GetType().GetMethod("DorsalFlexionRad", BindingFlags.Instance | BindingFlags.NonPublic)
+                                     .Invoke(probe, new object[] { chain, false });
+            Check(Near(flex * Mathf.Rad2Deg, 50f, 0.05f), "index flexion MCP->DIP should be 50 deg, got " + flex * Mathf.Rad2Deg);
+            float L = Field<float>(probe, "_indexDorsalRestLengthMm") + Field<float>(probe, "_dorsalLengthPerRadMm") * flex;
+            Check(Near(L, 88.73f, 0.05f), "L for a 50 deg bend should be 88.73 mm (sent unclamped; the relay clamps), got " + L);
+        }
+
         // ---- 3. the component, end to end against the Python board simulator ----
         var glove = new GameObject("StaticHandModel_Right");
         var haptics = glove.AddComponent<HapticRenderer>();
@@ -91,8 +118,18 @@ public static class Tests
         Check(boards[0].online && boards[1].online, "both simulated boards should be discovered");
         Check(boards[1].rttMs > 0 && boards[1].rttMs < 50, "RTT to the relay on localhost: " + boards[1].rttMs);
         Check(Field<float>(outp, "_gate") < 0.01f, "gate should have faded to 0 after tracking loss");
+        Check(Near(o[1].dorsalLengthMm, 80f, 0.01f) && Near(o[0].dorsalLengthMm, 80f, 0.01f),
+              $"straight fingers: L should be the rest length (80 mm for both), got thumb {o[0].dorsalLengthMm} index {o[1].dorsalLengthMm}");
         Check(maxWhileOff == 0f, "a disabled HapticRenderer must send zero, not its last force: " + maxWhileOff);
         Check(backAfter > 1f, "force should come back when the renderer is re-enabled: " + backAfter);
+        // Packet layout: each finger's six numbers together (contact, P, U, V, T, L), version last.
+        var cmd = Field<float[]>(outp, "_cmd");
+        Check(cmd.Length == 16 && cmd[15] == 3f, "16 floats, version 3 at index 15");
+        Check(cmd[3] == 1f && Near(cmd[4], o[0].pressN, 1e-6f) && Near(cmd[7], o[0].dorsalTorqueNm, 1e-6f) && Near(cmd[8], o[0].dorsalLengthMm, 1e-4f),
+              $"thumb block 3..8: contact {cmd[3]} P {cmd[4]} T {cmd[7]} L {cmd[8]}");
+        Check(cmd[9] == 1f && Near(cmd[10], o[1].pressN, 1e-6f) && Near(cmd[11], o[1].tiltN.x, 1e-6f) &&
+              Near(cmd[13], o[1].dorsalTorqueNm, 1e-6f) && Near(cmd[14], o[1].dorsalLengthMm, 1e-4f),
+              $"index block 9..14: contact {cmd[9]} P {cmd[10]} U {cmd[11]} T {cmd[13]} L {cmd[14]}");
         Call(outp, "OnDisable");
 
         Console.WriteLine($"{pass} passed, {fail} failed");

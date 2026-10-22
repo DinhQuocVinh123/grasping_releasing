@@ -73,7 +73,7 @@ namespace UnityEngine
         public const float Deg2Rad = (float)(Math.PI / 180), Rad2Deg = (float)(180 / Math.PI);
         public static float Sqrt(float f) => (float)Math.Sqrt(f); public static float Sin(float f) => (float)Math.Sin(f); public static float Cos(float f) => (float)Math.Cos(f);
         public static float Atan2(float y, float x) => (float)Math.Atan2(y, x); public static float Max(float a, float b) => Math.Max(a, b); public static float Min(float a, float b) => Math.Min(a, b);
-        public static float Abs(float a) => Math.Abs(a);
+        public static float Abs(float a) => Math.Abs(a); public static float Clamp(float v, float lo, float hi) => v < lo ? lo : v > hi ? hi : v;
         public static float Clamp01(float v) => v < 0 ? 0 : v > 1 ? 1 : v; public static float Lerp(float a, float b, float t) => a + (b - a) * Clamp01(t);
         public static float InverseLerp(float a, float b, float v) => a != b ? Clamp01((v - a) / (b - a)) : 0f;
         public static float MoveTowards(float c, float t, float d) => Math.Abs(t - c) <= d ? t : c + Math.Sign(t - c) * d;
@@ -86,7 +86,10 @@ namespace UnityEngine
         public static void Log(object m, Object c = null) { Log_.Add("LOG " + m); Console.WriteLine("LOG " + m); }
         public static void LogWarning(object m, Object c = null) { Log_.Add("WARN " + m); Console.WriteLine("WARN " + m); }
         public static void LogError(object m, Object c = null) { Log_.Add("ERR " + m); Console.WriteLine("ERR " + m); }
+        public static void LogFormat(LogType t, LogOption o, Object c, string fmt, params object[] a) { string m = string.Format(fmt, a); Log_.Add("LOG " + m); Console.WriteLine("LOG " + m); }
     }
+    public enum LogType { Error, Assert, Warning, Log, Exception }
+    public enum LogOption { None, NoStacktrace }
     public class SerializeField : Attribute { } public class HeaderAttribute : Attribute { public HeaderAttribute(string s) { } }
     public class TooltipAttribute : Attribute { public TooltipAttribute(string s) { } } public class RangeAttribute : Attribute { public RangeAttribute(float a, float b) { } }
     public class DefaultExecutionOrder : Attribute { public DefaultExecutionOrder(int o) { } }

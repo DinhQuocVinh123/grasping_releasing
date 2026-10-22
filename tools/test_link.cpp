@@ -38,13 +38,13 @@ static void unitTests()
   CHECK(!g.alive(0), "not alive before any line");
 
   // The exact line the relay produces (glove_serial_bridge.make_line).
-  const std::string good = withChecksum("G,42,0.7516,0.2736,0.0000,0.01235,1.5000,-0.1000,0.2000,0.09000");
+  const std::string good = withChecksum("H,42,0.7516,0.2736,0.0000,0.01235,1.5000,-0.1000,0.2000,0.09000");
   CHECK(feedAll(g, good, 1000) == 1, "valid line rejected");
   CHECK(g.seq == 42, "seq");
   CHECK(std::fabs(g.finger[0].pressN - 0.7516f) < 1e-5f && std::fabs(g.finger[0].tiltU - 0.2736f) < 1e-5f &&
-        g.finger[0].tiltV == 0.0f && std::fabs(g.finger[0].torqueNm - 0.01235f) < 1e-6f, "thumb values");
+        g.finger[0].tiltV == 0.0f && std::fabs(g.finger[0].dorsalBar - 0.01235f) < 1e-6f, "thumb values");
   CHECK(std::fabs(g.finger[1].pressN - 1.5f) < 1e-5f && std::fabs(g.finger[1].tiltU + 0.1f) < 1e-5f &&
-        std::fabs(g.finger[1].tiltV - 0.2f) < 1e-5f && std::fabs(g.finger[1].torqueNm - 0.09f) < 1e-6f, "index values");
+        std::fabs(g.finger[1].tiltV - 0.2f) < 1e-5f && std::fabs(g.finger[1].dorsalBar - 0.09f) < 1e-6f, "index values");
   CHECK(g.alive(1150) && !g.alive(1250), "alive window is 200 ms");
 
   // Windows line ending, and text from elsewhere on the port, are tolerated.
@@ -56,26 +56,31 @@ static void unitTests()
   // Everything below must be rejected AND leave the last good values alone.
   const uint32_t goodBefore = g.goodLines;
   const char* bad[] = {
-    "G,42,0.7516,0.2736,0.0000,0.01235,1.5000,-0.1000,0.2000,0.09000*00\n",   // wrong checksum
-    "G,42,0.7516,0.2736,0.0000,0.01235,1.5000,-0.1000,0.2000,0.09000\n",      // no checksum
+    "H,42,0.7516,0.2736,0.0000,0.01235,1.5000,-0.1000,0.2000,0.09000*00\n",   // wrong checksum
+    "H,42,0.7516,0.2736,0.0000,0.01235,1.5000,-0.1000,0.2000,0.09000\n",      // no checksum
   };
   for (const char* b : bad) CHECK(feedAll(g, b, 3000) == 0, "accepted: %s", b);
-  CHECK(feedAll(g, withChecksum("G,42,0.75,0.27,0.0,0.01,1.5,-0.1,0.2"), 3000) == 0, "8 fields accepted");
-  CHECK(feedAll(g, withChecksum("G,42,0.75,0.27,0.0,0.01,1.5,-0.1,0.2,0.09,7"), 3000) == 0, "10 fields accepted");
-  CHECK(feedAll(g, withChecksum("G,42,0.75,abc,0.0,0.01,1.5,-0.1,0.2,0.09"), 3000) == 0, "non-number accepted");
-  CHECK(feedAll(g, withChecksum("G,42,0.75,,0.0,0.01,1.5,-0.1,0.2,0.09"), 3000) == 0, "empty field accepted");
-  CHECK(feedAll(g, withChecksum("G,42,nan,0,0,0,0,0,0,0"), 3000) == 0, "NaN accepted");
-  CHECK(feedAll(g, std::string(300, 'G') + "\n", 3000) == 0, "overlong line accepted");
+  CHECK(feedAll(g, withChecksum("H,42,0.75,0.27,0.0,0.01,1.5,-0.1,0.2"), 3000) == 0, "8 fields accepted");
+  CHECK(feedAll(g, withChecksum("H,42,0.75,0.27,0.0,0.01,1.5,-0.1,0.2,0.09,7"), 3000) == 0, "10 fields accepted");
+  CHECK(feedAll(g, withChecksum("H,42,0.75,abc,0.0,0.01,1.5,-0.1,0.2,0.09"), 3000) == 0, "non-number accepted");
+  CHECK(feedAll(g, withChecksum("H,42,0.75,,0.0,0.01,1.5,-0.1,0.2,0.09"), 3000) == 0, "empty field accepted");
+  CHECK(feedAll(g, withChecksum("H,42,nan,0,0,0,0,0,0,0"), 3000) == 0, "NaN accepted");
+  CHECK(feedAll(g, std::string(300, 'H') + "\n", 3000) == 0, "overlong line accepted");
   CHECK(g.goodLines == goodBefore && std::fabs(g.finger[1].pressN - 1.5f) < 1e-5f, "a bad line changed the values");
   CHECK(feedAll(g, good, 3000) == 1, "parser did not recover after bad lines");
 
   // A line cut in half by a reset is dropped, the next one is fine.
-  CHECK(feedAll(g, "G,43,0.75,0.2", 4000) == 0 && feedAll(g, "\n", 4000) == 0, "half line accepted");
+  CHECK(feedAll(g, "H,43,0.75,0.2", 4000) == 0 && feedAll(g, "\n", 4000) == 0, "half line accepted");
   CHECK(feedAll(g, good, 4000) == 1, "line after a half line rejected");
 
-  // Negative force or torque is clamped to zero (the relay never sends one, but still).
-  CHECK(feedAll(g, withChecksum("G,44,-1.0,0,0,-0.5,0,0,0,0"), 5000) == 1 &&
-        g.finger[0].pressN == 0.0f && g.finger[0].torqueNm == 0.0f, "negatives not clamped");
+  // Negative pad force is clamped to zero; the dorsal pressure is passed through (the sketch clamps it).
+  CHECK(feedAll(g, withChecksum("H,44,-1.0,0,0,-0.5,0,0,0,0"), 5000) == 1 &&
+        g.finger[0].pressN == 0.0f && g.finger[0].dorsalBar == -0.5f, "pad not clamped / bar changed");
+
+  // The OLD torque line ('G') must not be accepted: a torque read as a pressure would be wrong.
+  const uint32_t before = g.goodLines;
+  CHECK(feedAll(g, withChecksum("G,45,0.75,0.27,0.0,0.01,1.5,-0.1,0.2,0.09"), 6000) == 0 && g.goodLines == before,
+        "old G line accepted");
 }
 
 static uint32_t nowMs()
@@ -89,7 +94,7 @@ static uint32_t nowMs()
 static int fake(const char* logPath)
 {
   FILE* log = std::fopen(logPath, "w");
-  std::fprintf(log, "ms,seq,thP,thU,thV,thT,ixP,ixU,ixV,ixT\n");
+  std::fprintf(log, "ms,seq,thP,thU,thV,thBar,ixP,ixU,ixV,ixBar\n");
   GloveSerialLink g;
   const uint32_t t0 = nowMs();
   uint32_t lastEcho = 0;
@@ -105,7 +110,7 @@ static int fake(const char* logPath)
       for (ssize_t i = 0; i < n; i++)
         if (g.feed(buf[i], nowMs())) {
           std::fprintf(log, "%u,%u", nowMs() - t0, g.seq);
-          for (auto& f : g.finger) std::fprintf(log, ",%.5f,%.5f,%.5f,%.6f", f.pressN, f.tiltU, f.tiltV, f.torqueNm);
+          for (auto& f : g.finger) std::fprintf(log, ",%.5f,%.5f,%.5f,%.6f", f.pressN, f.tiltU, f.tiltV, f.dorsalBar);
           std::fprintf(log, "\n");
           std::fflush(log);
         }
