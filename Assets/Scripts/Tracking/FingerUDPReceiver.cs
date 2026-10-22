@@ -94,20 +94,8 @@ public class FingerUDPReceiver : MonoBehaviour
     private FingertipSurfaceConstraint _constraint;
     private GloveWristStabilizer _wristStabilizer;
 
-    // --- Per-stage latency: one glove_latency_*.csv row per image result (with _logDiagnostics) ---
-    // The receive thread records when the packet arrived + the "tm:" part Python sends; the main thread joins that with the
-    // headset timestamps (GloveLiveStreamer.TryGetFrameTimings) and the moment ImageHandSolver picks the result.
-    // tools/latency_breakdown.py reads this file.
-    private struct PacketTiming { public int Fid; public double Arrive; public string Py; }
-    private readonly System.Collections.Concurrent.ConcurrentQueue<PacketTiming> _timingQueue =
-        new System.Collections.Concurrent.ConcurrentQueue<PacketTiming>();
-    private readonly System.Collections.Generic.List<PacketTiming> _pendingTimings = new System.Collections.Generic.List<PacketTiming>();
-    private const int PickHistory = 64;
-    private readonly int[] _pickFid = new int[PickHistory];
-    private readonly double[] _pickTime = new double[PickHistory];
-    private int _lastPickFid;
-    private const int PyTimingFields = 11; // number of fields in "tm:" (run_glove_quest_stream.py)
-    private System.IO.StreamWriter _latencyLog;
+    // Per-stage latency: one glove_latency_*.csv row per image result (with _logDiagnostics), see GloveLatencyLog.
+    private readonly GloveLatencyLog _latency = new GloveLatencyLog();
 
     private void Awake()
     {
@@ -165,8 +153,7 @@ public class FingerUDPReceiver : MonoBehaviour
         if (_handVisual != null) _handVisual.WhenHandVisualUpdated -= ApplyHand;
         _diag?.Dispose();
         _diag = null;
-        _latencyLog?.Dispose();
-        _latencyLog = null;
+        _latency.Close();
     }
 
     /// <summary>Total flexion (degrees) of one finger (0 = straight), to estimate how far the actuator is bent.
@@ -199,13 +186,7 @@ public class FingerUDPReceiver : MonoBehaviour
             if (!_latestPixelValid || frameId <= 0) return false;
             Array.Copy(_latestUV, uv, HandImageFit.Points);
             Array.Copy(_latestConf, conf, HandImageFit.Points);
-            if (frameId != _lastPickFid)
-            {
-                // First time the virtual hand takes this image result (pick_ms column in glove_latency)
-                _lastPickFid = frameId;
-                _pickFid[frameId % PickHistory] = frameId;
-                _pickTime[frameId % PickHistory] = GloveLiveStreamer.ClockNow;
-            }
+            _latency.OnPicked(frameId); // first time the virtual hand takes this image result (pick_ms column in glove_latency)
             return true;
         }
     }
@@ -269,7 +250,7 @@ public class FingerUDPReceiver : MonoBehaviour
                 if (key == "da") { _latestDorsalArea = v; _latestDorsal = v > 0f ? 1 : 0; continue; }
             }
             if (_logDiagnostics && pyTimings != null && _latestFrameId > 0)
-                _timingQueue.Enqueue(new PacketTiming { Fid = _latestFrameId, Arrive = arrive, Py = pyTimings });
+                _latency.OnPacket(_latestFrameId, arrive, pyTimings);
         }
     }
 
@@ -319,7 +300,8 @@ public class FingerUDPReceiver : MonoBehaviour
         if (_logDiagnostics)
         {
             WriteDiagnostics();
-            WriteLatencyLog();
+            if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
+            _latency.Write(_streamer, this);
         }
     }
 
@@ -494,61 +476,5 @@ public class FingerUDPReceiver : MonoBehaviour
           .Append(',').Append((q != null ? q.RawTime : 0f).ToString("F4", inv));
         _diag.WriteLine(sb);
         if (Time.frameCount % 72 == 0) _diag.Flush(); // no data lost if the app is closed abruptly
-    }
-
-    /// <summary>Writes glove_latency: one row per image result, once the virtual hand has taken it (or 0.5 s after it arrived
-    /// without being taken -- a newer image came first, pick_ms = -1). Each column is the ms between two consecutive stamps:
-    /// exposure -> image requested (cam) -> GPU returns the image (rb) -> worker thread starts encoding (wq) -> encoded (enc) -> sent (send)
-    /// -> result back on the headset (rtt; includes Wi-Fi out + queueing + Python + Wi-Fi back) -> taken by the virtual hand (pick).</summary>
-    private void WriteLatencyLog()
-    {
-        while (_timingQueue.TryDequeue(out PacketTiming p)) _pendingTimings.Add(p);
-        if (_pendingTimings.Count == 0) return;
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        if (_latencyLog == null)
-        {
-            string path = System.IO.Path.Combine(Application.persistentDataPath,
-                "glove_latency_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
-            _latencyLog = new System.IO.StreamWriter(path, false, new System.Text.UTF8Encoding(false));
-            _latencyLog.WriteLine("fid,arr_s,jpeg_kb,cam_ms,rb_ms,wq_ms,enc_ms,send_ms,rtt_ms," +
-                                  "py_blocked,py_wait_ms,py_xfer_ms,py_decode_ms,py_infer_ms,py_ninfer,py_other_ms,py_pc_ms," +
-                                  "py_prev_cycle_ms,py_prev_tail_ms,py_dropped,pick_ms,total_ms");
-            Debug.Log($"[FingerUDPReceiver] Writing per-stage latency to {path}", this);
-        }
-        if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
-        double now = GloveLiveStreamer.ClockNow;
-        var sb = new System.Text.StringBuilder(256);
-        int keep = 0;
-        for (int i = 0; i < _pendingTimings.Count; i++)
-        {
-            PacketTiming p = _pendingTimings[i];
-            int ps = p.Fid % PickHistory;
-            bool picked = _pickFid[ps] == p.Fid;
-            if (!picked && now - p.Arrive < 0.5)
-            {
-                _pendingTimings[keep++] = p; // wait for the virtual hand to take this result
-                continue;
-            }
-            GloveLiveStreamer.FrameTimings t = default;
-            bool ok = _streamer != null && _streamer.TryGetFrameTimings(p.Fid, out t);
-            string Ms(double from, double to) => ok && from > 0 && to > 0 ? ((to - from) * 1000.0).ToString("F1", inv) : "-1";
-            sb.Clear();
-            sb.Append(p.Fid).Append(',').Append(p.Arrive.ToString("F4", inv))
-              .Append(',').Append(ok ? (t.JpegBytes / 1024f).ToString("F1", inv) : "-1")
-              .Append(',').Append(ok ? t.CameraAgeMs.ToString("F1", inv) : "-1")
-              .Append(',').Append(Ms(t.Capture, t.Readback))
-              .Append(',').Append(Ms(t.Readback, t.EncodeStart))
-              .Append(',').Append(Ms(t.EncodeStart, t.EncodeEnd))
-              .Append(',').Append(Ms(t.EncodeEnd, t.Sent))
-              .Append(',').Append(Ms(t.Sent, p.Arrive));
-            string[] py = p.Py.Split('|');
-            for (int k = 0; k < PyTimingFields; k++) sb.Append(',').Append(k < py.Length ? py[k] : "");
-            sb.Append(',').Append(picked ? Ms(p.Arrive, _pickTime[ps]) : "-1");
-            sb.Append(',').Append(picked && ok && t.CameraAgeMs >= 0f
-                ? (t.CameraAgeMs + (_pickTime[ps] - t.Capture) * 1000.0).ToString("F1", inv) : "-1");
-            _latencyLog.WriteLine(sb);
-        }
-        _pendingTimings.RemoveRange(keep, _pendingTimings.Count - keep);
-        if (Time.frameCount % 72 == 0) _latencyLog.Flush();
     }
 }
