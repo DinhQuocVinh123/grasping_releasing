@@ -1,80 +1,79 @@
 using UnityEngine;
 
 /// <summary>
-/// Dung ban tay ao (co tay + ngon cai + ngon tro) TU ANH: moi diem model thay tren anh la 1 TIA tu
-/// camera; tim vi tri/huong co tay va goc cac khop sao cho moi khop ao nam tren tia cua no.
+/// Fits the virtual hand (wrist + thumb + index) TO THE IMAGE: every point the model finds in the image is a RAY from
+/// the camera; find the wrist position / rotation and the joint angles so that each virtual joint lies on its ray.
 ///
-/// Khac cach cu (FingerUDPReceiver.CorrectHandToImage + FingerChainFitter rieng tung ngon):
-/// cach cu lay co tay QUEST (gang moi -> sai, rung) lam nen roi va 6 lop len tren, giai lai 60
-/// lan/giay theo co tay dang rung. O day anh la nguon chinh, giai 1 lan cho MOI anh; Quest chi
-/// gop phan anh khong cho biet (tay cach camera bao xa, long ban tay up hay ngua) qua rang buoc nhe.
+/// The image is the main source and is solved once PER IMAGE. The Quest only adds what the image cannot tell (how far
+/// the hand is from the camera, palm up or down), as weak constraints. (An earlier approach built on the QUEST wrist,
+/// which is wrong and jittery with the glove, and re-solved 60 times per second against that jittery wrist.)
 ///
-/// Anh 2D khong co chieu sau, nen bu bang dieu biet chac: xuong co chieu dai co dinh (doan ngan tren
-/// anh = dang chia vao/ra camera), khop chi gap 1 chieu trong gioi han, tay khong lat trong 0.1 s
-/// (gan dap an anh truoc), chieu sau gan Quest (da lam muot).
+/// A 2D image has no depth, so it is completed with what is known for sure: bones have a fixed length (a short segment
+/// in the image = tilted towards / away from the camera), joints only bend one way within limits, the hand does not flip
+/// in 0.1 s (stay close to the previous answer), and the depth is close to the (smoothed) Quest depth.
 ///
-/// Thuan C# (khong MonoBehaviour) de chay thu trong Editor tren ban ghi.
+/// Solved with Levenberg-Marquardt over 14 unknowns. Plain C# (no MonoBehaviour) so it can be tested in the Editor on recordings.
 /// </summary>
 public sealed class HandImageFit
 {
-    public const int Points = 9; // 0 co tay, 1-4 ngon cai (goc -> dau), 5-8 ngon tro
-    private const int NP = 14;   // [0..2] dich co tay (cm), [3..5] xoay co tay (do, vector quay the gioi), [6..9] cai, [10..13] tro
-    private const int NR = 2 * Points + 1 + 3 + 3 + 3 + 8 + 6 + 8 + 2 + 3 + 3; // ... + 6 chong be nguoc, 8 dang tay hoc tu tay tran, 2 cong an, 3 cum luc giac, 3 pinch
+    public const int Points = 9; // 0 wrist, 1-4 thumb (base -> tip), 5-8 index
+    private const int NP = 14;   // [0..2] wrist offset (cm), [3..5] wrist rotation (degrees, world rotation vector), [6..9] thumb, [10..13] index
+    private const int NR = 2 * Points + 1 + 3 + 3 + 3 + 8 + 6 + 8 + 2 + 3 + 3; // ... + 6 hyperextension, 8 pose prior learned from the bare hand, 2 hidden bend, 3 hexagon plate, 3 pinch
 
-    // Trong so (don vi: sai so anh tinh bang CHIEU DAI LONG BAN TAY o chieu sau cua tay).
-    // Sai 10 pixel ~ 0.05. Static de chinh thu tren ban ghi.
-    public static float DepthPriorWeight = 0.1f;     // moi 1 long ban tay lech chieu sau so voi Quest
-    public static float RotPriorWeight = 0.0015f;    // moi do lech huong Quest (Quest rung 30-50 do -> chi de chon up/ngua)
-    public static float TemporalPosWeight = 0.4f;    // moi 1 long ban tay doi so voi anh truoc (gia lap nhieu 8 px: 0.05 -> nhay 56/145 anh, 0.4 -> 0)
-    public static float TemporalRotWeight = 0.012f;  // moi do doi so voi anh truoc (ban ghi 01/10 16:58: 0.006 -> xoay >5 do/khung 102 lan, 0.012 -> 38)
+    // Weights (unit: image error measured in PALM LENGTHS at the hand's depth).
+    // 10 pixels of error is about 0.05. Static so they can be tuned on recordings.
+    public static float DepthPriorWeight = 0.1f;     // per palm length of depth difference from the Quest
+    public static float RotPriorWeight = 0.0015f;    // per degree from the Quest rotation (the Quest jitters 30-50 degrees -> only to choose palm up / down)
+    public static float TemporalPosWeight = 0.4f;    // per palm length of change from the previous image (simulated 8 px noise: 0.05 -> jumps in 56/145 images, 0.4 -> 0)
+    public static float TemporalRotWeight = 0.012f;  // per degree of change from the previous image (recording: 0.006 -> rotation > 5 degrees/frame 102 times, 0.012 -> 38)
     public static float TemporalAngleWeight = 0.006f;
-    public static float PinchWeight = 2f;            // 2 dau ngon cach nhau hon PinchContactDistance khi anh thay dang chum
+    public static float PinchWeight = 2f;            // fingertips further apart than PinchContactDistance while the image shows them together
     public static float PinchContactDistance = 0.016f;
-    public static float PinchNearOnImage = 0.2f;     // khoang cach 2 dau ngon tren anh / |co tay - goc ngon tro|
+    public static float PinchNearOnImage = 0.2f;     // distance between the two fingertips in the image / |wrist - index base|
     public static float PinchFarOnImage = 0.45f;
-    public static float SwitchRatio = 0.7f;          // doi sang cach hieu khac khi sai so thap hon it nhat 30%
-    // Cum mieng luc giac mau be tren dot goc 3 ngon dang nam (Python tim theo mau): diem so 10. 9 diem
-    // co tay/cai/tro gan nhu khong cho biet ban tay LAT quanh truc co tay -> goc ngon tro bao nhieu
-    // (chi diem 1 lech khoi truc ~2 cm, lai la diem model dat kem nhat) -> tay ao hay nghieng canh sai.
-    public static float DorsalWeight = 1.0f;         // sai so anh cua tam cum. Ban ghi 01/10 17:45 (611 anh thay cum): mat ban tay tren anh rong 0.11 -> 0.29 long ban tay (dung voi anh), sai so 9 diem 0.070 -> 0.074
-    public static float DorsalHiddenWeight = 0.3f;   // khong thay cum ma mat cum lai quay ve camera
-    public static float DorsalHiddenFacing = 0.35f;  // cos goc giua phap tuyen mat cum va huong ve camera, tren muc nay thi phai thay
-    public static float DorsalOffset = 0.012f;       // mieng luc giac + vai gang nho len khoi xuong (met)
-    // Diem CO TAY (diem 0) model dat tren anh nam o dau so voi khop co tay cua tay ao (he co tay, met).
+    public static float SwitchRatio = 0.7f;          // switch to another interpretation when its error is at least 30% lower
+    // Coloured hexagon plate on the base segments of the three curled fingers (found by colour in Python): point 10. The 9
+    // wrist / thumb / index points say almost nothing about how the hand is TURNED about the wrist -> index base axis
+    // (only point 1 is ~2 cm off that axis, and it is the point the model places worst) -> the virtual hand often tilted sideways.
+    public static float DorsalWeight = 1.0f;         // image error of the plate centre. Recording (611 images with the plate seen): visible hand width 0.11 -> 0.29 palm lengths (matches the image), 9-point error 0.070 -> 0.074
+    public static float DorsalHiddenWeight = 0.3f;   // plate not seen although it faces the camera
+    public static float DorsalHiddenFacing = 0.35f;  // cos of the angle between the plate normal and the direction to the camera; above this it must be visible
+    public static float DorsalOffset = 0.012f;       // the plate + glove fabric stick out from the bone (m)
+    // Where the model's WRIST point (point 0) lies relative to the virtual hand's wrist joint (wrist frame, m).
     public static Vector3 WristPointLocal = Vector3.zero;
-    // Diem GOC NGON TRO (diem 5) model dat lech bao nhieu so voi khop goc ngon tro tay ao (he co tay, met).
-    // Model gang moi dat diem 5 gan diem 9 (giua cac khop goc), lech ve phia ngon ut ~2 cm (+X cua co tay
-    // XRHand). Ban ghi 01/10 19:07 + 19:26: doi 2 cm -> do xoe ngon tro med -30 -> -4 do, ngon cai be nguoc
-    // 23% -> 1% thoi gian, sai so anh 0.063/0.068 -> 0.061/0.065.
+    // How far the model's INDEX BASE point (point 5) is from the virtual index base joint (wrist frame, m).
+    // The glove model places point 5 near point 9 (between the base joints), about 2 cm towards the little finger (+X of the
+    // XRHand wrist). Two recordings with a 2 cm offset: median index spread -30 -> -4 degrees, thumb hyperextension 23% -> 1% of
+    // the time, image error 0.063/0.068 -> 0.061/0.065.
     public static Vector3 IndexMcpPointLocal = new Vector3(0.02f, 0f, 0f);
     private const float HyperextensionWeight = 0.006f;
 
-    // DANG TAY HOC TU TAY TRAN (HandPoseRecorder: tay trai Quest theo doi, 02/10 11:31 + 12:15, 13959 khung, 1704
-    // khung pinch chat; chuyen sang goc khop tay gang -- lech huong tung dot ~0.6-1.3 do). 2 kieu pinch: 11:31 khop
-    // goc gap nhieu (47/37/18), 12:15 (cam bong ao) khop giua gap nhieu (19/47/33) -- ma tran tuong quan rong du cho ca 2. Thay cho cac rang buoc dat tay truoc day
-    // (khop dau = 2/3 khop giua, khop giua >= khop goc, dang pinch 35/55/35): tay that khi pinch la ~47/37/18,
-    // 54% thoi gian khop goc gap hon khop giua 10 do, khop dau ~0.55 khop giua.
-    // Mo hinh: goc trung binh noi suy theo muc pinch (mo -> chum) + ma tran tuong quan 8 goc (cai, tro: xoe/goc/
-    // giua/dau). Phat = khoang cach Mahalanobis -> cac khop di cung nhau nhu tay that.
-    // 03/10: hoc lai sau khi FingerChainFitter.StraightenFingers (goc 0 = ngon THANG): khop dau ngon tro mo tay
-    // 9.4 -> 1.0 do, pinch 32.9 -> 24.6 do (truoc do so voi dot cuoi venh nguoc ~8 do cua rig).
-    // CONG AN cua ngon tro: phan gap 3D ma anh KHONG thay (ngon cong ve phia / ra xa camera trong anh van thang).
-    // Mot camera khong phan biet duoc -> bo giai co the them cong an ma van khop anh; nhin tu mat (khac goc camera)
-    // thanh ngon cong queo. Phat (gap 3D - gap tren anh) o khop giua + khop dau, moi do.
-    // 03/10 (co cong StraightOnImage), ban ghi 13:44 tay phai->trai gan/xa/pinch: cong an DIP p90 10-13 -> 4-5 do,
-    // gap DIP p90 28-32 -> 21 do, sai so anh khong doi, khe 2 dau ngon khi pinch 1.9 -> 2.0 cm. Synthetic: huong co tay
-    // trung vi 2-6 -> 4-5 do (khong cong: 6 do). 0.032 chi tot them chut, giat hon o ban ghi voi xa.
+    // HAND POSE LEARNED FROM THE BARE HAND (HandPoseRecorder: Quest-tracked left hand, two sessions, 13959 frames, 1704 frames of
+    // tight pinch; converted to glove-hand joint angles, about 0.6-1.3 degrees off per segment). Two pinch styles: one with the base
+    // joint bent most (47/37/18), one (holding the virtual ball) with the middle joint bent most (19/47/33); the covariance is wide
+    // enough for both. It replaces earlier hand-set constraints (distal = 2/3 of middle, middle >= base, pinch pose 35/55/35):
+    // in a real pinch the base joint is ~47/37/18, 54% of the time bent 10 degrees more than the middle joint, and distal ~0.55 x middle.
+    // Model: mean angles interpolated by pinch level (open -> pinched) + an 8-angle covariance (thumb, index: spread / base /
+    // middle / distal). Penalty = Mahalanobis distance -> joints move together like a real hand.
+    // Re-learned after FingerChainFitter.StraightenFingers (angle 0 = STRAIGHT finger): index distal joint with the hand open
+    // 9.4 -> 1.0 degrees, pinch 32.9 -> 24.6 degrees (before, relative to the rig's last segment bent back ~8 degrees).
+    // HIDDEN BEND of the index finger: 3D flexion the image does NOT show (a finger bending towards / away from the camera still
+    // looks straight). One camera cannot tell, so the solver could add hidden bend and still match the image; seen from the eyes
+    // (a different angle than the camera) the finger looks crooked. Penalty = (3D bend - bend in the image) at the middle and distal
+    // joints, per degree. With StraightOnImage, on a recording moving near / far / pinching: hidden distal bend p90 10-13 -> 4-5 degrees,
+    // distal flexion p90 28-32 -> 21 degrees, image error unchanged, fingertip gap in a pinch 1.9 -> 2.0 cm. Synthetic test: median wrist
+    // rotation error 2-6 -> 4-5 degrees (without the gate: 6). 0.032 was only slightly better and jumpier on the far-reach recording.
     public static float HiddenBendWeight = 0.016f;
-    // Chi phat khi ANH cho thay ngon thang: dot giua + dot cuoi (diem 6-7-8) gay it va KHONG bi co ngan (ngon cong
-    // ve phia camera trong anh ngan di). Phat deu tay lam sai ngon cong that theo chieu sau: bai Synthetic (ngon cong
-    // kieu pinch, co dap an) huong co tay lech 2 -> 6 do. Ban ghi 03/10: nhin ngang gay tren anh p90 7-9 do, dai >= 0.32
-    // long ban tay; chia doc truc nhin dai 0.11-0.22.
-    public static float StraightBendFull = 8f, StraightBendZero = 15f;      // gay tren anh (do) tai diem 7
-    public static float StraightLenZero = 0.22f, StraightLenFull = 0.30f;   // (|6-7| + |7-8|) / |0-5| tren anh
-    public static float PosePriorWeight = 0.02f;     // moi 1 do lech chuan (sai 2 do lech chuan ~ sai anh 0.04 long ban tay)
+    // Only penalised when the IMAGE shows a straight finger: middle + distal segments (points 6-7-8) barely bent and NOT
+    // foreshortened (a finger bending towards the camera looks shorter). A uniform penalty breaks fingers that really bend in depth:
+    // on the synthetic test (pinch-style bend, known answer) the wrist rotation error went 2 -> 6 degrees. Recordings: seen from the side
+    // the image bend is p90 7-9 degrees with length >= 0.32 palm lengths; pointing along the view axis the length is 0.11-0.22.
+    public static float StraightBendFull = 8f, StraightBendZero = 15f;      // bend in the image (degrees) at point 7
+    public static float StraightLenZero = 0.22f, StraightLenFull = 0.30f;   // (|6-7| + |7-8|) / |0-5| in the image
+    public static float PosePriorWeight = 0.02f;     // per standard deviation (2 SD ~ 0.04 palm lengths of image error)
     private static readonly float[] PoseMeanOpen = { 0.8791f, 4.2680f, 27.0197f, 0.9191f, 2.7536f, 11.5433f, 18.6156f, 1.0288f };
     private static readonly float[] PoseMeanPinch = { 7.0680f, 11.1249f, 38.0017f, 15.8167f, 2.2528f, 18.5744f, 47.1248f, 24.5913f };
-    private static readonly float[,] PoseWhiten = // nghich dao Cholesky cua ma tran hiep phuong sai (don vi: 1/do)
+    private static readonly float[,] PoseWhiten = // inverse Cholesky factor of the covariance matrix (unit: 1/degree)
     {
         { 0.0670f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f },
         { 0.0236f, 0.1975f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f },
@@ -86,28 +85,28 @@ public sealed class HandImageFit
         { -0.0627f, -0.0315f, 0.0120f, -0.0200f, 0.0055f, 0.0025f, -0.1728f, 0.3121f },
     };
     private readonly float[] _poseDev = new float[8];
-    private Vector3 _indexMcpJoint; // khop goc ngon tro THAT (diem 5 tren anh lech khoi no, xem IndexMcpPointLocal)
+    private Vector3 _indexMcpJoint; // the REAL index base joint (point 5 in the image is offset from it, see IndexMcpPointLocal)
 
     private readonly FingerChainFitter _thumb, _index;
-    private Vector3 _thumbRootL, _indexRootL;                  // goc ngon trong he co tay (met, theo Scale)
-    private readonly Quaternion _thumbParentL, _indexParentL;  // huong xuong cha cua goc ngon, trong he co tay
+    private Vector3 _thumbRootL, _indexRootL;                  // finger bases in the wrist frame (m, with Scale)
+    private readonly Quaternion _thumbParentL, _indexParentL;  // rotation of each finger base's parent bone, in the wrist frame
     private readonly float[] _min = new float[8], _max = new float[8];
     private bool _hasDorsalModel;
-    private Vector3 _dorsalL, _dorsalNL;                       // tam cum luc giac + phap tuyen mat cum, trong he co tay
+    private Vector3 _dorsalL, _dorsalNL;                       // hexagon plate centre + plate normal, in the wrist frame
     private Vector2 _dorsalTarget;
-    private int _dorsalState = -1;                             // -1 khong biet, 0 khong thay, 1 thay
+    private int _dorsalState = -1;                             // -1 unknown, 0 not seen, 1 seen
 
-    /// <summary>Co tay -> goc ngon tro cua tay ao (met).</summary>
+    /// <summary>Wrist -> index base of the virtual hand (m).</summary>
     public float PalmLength { get; private set; }
-    /// <summary>Ti le kich thuoc tay hien tai so voi luc tao (HandVisual doi kich thuoc tay khi chay).</summary>
+    /// <summary>Current hand size relative to creation time (HandVisual changes the hand size at run time).</summary>
     public float Scale { get; private set; } = 1f;
     private float _palmLength0;
     private Vector3 _thumbRootL0, _indexRootL0, _dorsalL0;
 
-    // Du lieu anh dang giai
+    // Data of the image being solved
     private Vector3 _camPos;
     private Quaternion _camRot, _camInv;
-    private readonly Vector2[] _target = new Vector2[Points]; // toa do chuan hoa x/z, y/z trong he camera
+    private readonly Vector2[] _target = new Vector2[Points]; // normalised coordinates x/z, y/z in the camera frame
     private readonly float[] _weight = new float[Points];
     private float _imgScale;
     private float _depthPrior;
@@ -121,32 +120,32 @@ public sealed class HandImageFit
     private Vector3 _baseP;
     private Quaternion _baseR;
 
-    /// <summary>Ket qua: co tay (the gioi).</summary>
+    /// <summary>Result: the wrist (world).</summary>
     public Vector3 Position { get; private set; }
     public Quaternion Rotation { get; private set; } = Quaternion.identity;
-    /// <summary>[0..3] ngon cai, [4..7] ngon tro: xoe, gap goc, gap giua, gap dau (do).</summary>
+    /// <summary>[0..3] thumb, [4..7] index: spread, base flexion, middle flexion, distal flexion (degrees).</summary>
     public readonly float[] Angles = new float[8];
     public bool HasSolution { get; private set; }
-    /// <summary>Sai so khop anh trung binh (don vi long ban tay; 0.05 ~ 4-5 mm).</summary>
+    /// <summary>Mean image fit error (palm lengths; 0.05 is about 4-5 mm).</summary>
     public float ImageError { get; private set; }
     public float LastCost { get; private set; }
     public float Pinch { get; private set; }
     public int Switches { get; private set; }
-    /// <summary>Chieu sau goc ngon tro (truc nhin camera, met) cua ket qua.</summary>
+    /// <summary>Depth of the index base (camera view axis, m) in the result.</summary>
     public float Depth { get; private set; }
-    /// <summary>Cum luc giac dung trong lan giai vua roi: -1 khong biet, 0 khong thay, 1 thay.</summary>
+    /// <summary>Hexagon plate used in the latest solve: -1 unknown, 0 not seen, 1 seen.</summary>
     public int DorsalUsed => _dorsalState;
-    /// <summary>0..1: anh cho thay ngon tro thang ro rang den dau (xem StraightBendFull) -- he so cua phat cong an.</summary>
+    /// <summary>0..1: how clearly the image shows a straight index finger (see StraightBendFull); scales the hidden bend penalty.</summary>
     public float StraightOnImage { get; private set; }
 
     private int _nextSeed;
     private static readonly float[,] FingerSeeds =
     {
-        { 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f },        // duoi thang
-        { 0f, 15f, 30f, 20f, 0f, 30f, 40f, 25f },  // nua nam / chuan bi pinch
-        { 0f, 30f, 50f, 40f, 0f, 60f, 80f, 50f },  // chum
+        { 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f },        // straight
+        { 0f, 15f, 30f, 20f, 0f, 30f, 40f, 25f },  // half closed / about to pinch
+        { 0f, 30f, 50f, 40f, 0f, 60f, 80f, 50f },  // pinched
     };
-    // Huong mau (do): x = nghieng quanh truc ngang tren anh, y = lat quanh truc co tay -> goc ngon tro
+    // Seed rotations (degrees): x = tilt about the horizontal axis in the image, y = turn about the wrist -> index base axis
     private static readonly Vector2[] TiltSeeds = { Vector2.zero, new Vector2(35f, 0f), new Vector2(-35f, 0f), new Vector2(0f, 70f), new Vector2(0f, -70f) };
 
     private readonly float[] _x = new float[NP], _trial = new float[NP], _a8 = new float[8], _bestA = new float[8];
@@ -159,13 +158,13 @@ public sealed class HandImageFit
     private static readonly float[] Step = { 0.05f, 0.05f, 0.05f, 0.2f, 0.2f, 0.2f, 0.3f, 0.3f, 0.3f, 0.3f, 0.3f, 0.3f, 0.3f, 0.3f };
     private static readonly float[] MaxStep = { 5f, 5f, 5f, 20f, 20f, 20f, 25f, 25f, 25f, 25f, 25f, 25f, 25f, 25f };
 
-    /// <summary>Doc hinh dang ban tay ao O TU THE NGHI (goi luc Awake, cung luc tao 2 FingerChainFitter).</summary>
+    /// <summary>Reads the virtual hand's shape IN ITS REST POSE (call at Awake, together with creating the two FingerChainFitters).</summary>
     public HandImageFit(Transform wrist, FingerChainFitter thumb, FingerChainFitter index)
         : this(wrist, new[] { thumb, index }, Vector3.zero, Vector3.zero) { }
 
-    /// <param name="fitters">5 ngon (cai, tro, giua, ap ut, ut); 3 ngon sau de tinh vi tri cum luc giac (co the null).</param>
-    /// <param name="palmTarget">Diem phia LONG ban tay (FingerChainFitter.PalmTarget) -- de biet phia mu ban tay.</param>
-    /// <param name="closedAngles">Goc nam cua 3 ngon giua/ap ut/ut (FingerUDPReceiver).</param>
+    /// <param name="fitters">5 fingers (thumb, index, middle, ring, little); the last three place the hexagon plate (may be null).</param>
+    /// <param name="palmTarget">A point on the PALM side (FingerChainFitter.PalmTarget), to know which side is the back of the hand.</param>
+    /// <param name="closedAngles">Curl angles of the middle / ring / little fingers (FingerUDPReceiver).</param>
     public HandImageFit(Transform wrist, FingerChainFitter[] fitters, Vector3 palmTarget, Vector3 closedAngles)
     {
         FingerChainFitter thumb = fitters[0], index = fitters[1];
@@ -186,8 +185,8 @@ public sealed class HandImageFit
             _min[4 + p] = index.MinAngle(p); _max[4 + p] = index.MaxAngle(p);
         }
 
-        // Tam cum luc giac: giua dot goc (MCP -> PIP) cua 3 ngon dang nam, nho len phia mu ngon.
-        // Mat cum quay ve phia TRUOC nam tay (dot goc gap ~75 do), khong quay len nhu mu ban tay.
+        // Plate centre: middle of the base segments (MCP -> PIP) of the three curled fingers, raised towards the back of the fingers.
+        // The plate faces the FRONT of the fist (base segments bent ~75 degrees), not upwards like the back of the hand.
         if (fitters.Length >= 5 && palmTarget != Vector3.zero)
         {
             Vector3 mid = Vector3.zero, along = Vector3.zero, palmCenter = wrist.position + index.RootBone.position;
@@ -209,7 +208,7 @@ public sealed class HandImageFit
             {
                 mid /= n;
                 palmCenter /= nc;
-                Vector3 back = (palmCenter - palmTarget).normalized; // huong mu ban tay
+                Vector3 back = (palmCenter - palmTarget).normalized; // towards the back of the hand
                 Vector3 normal = Vector3.ProjectOnPlane(back, along.normalized).normalized;
                 _dorsalL = _dorsalL0 = inv * (mid + normal * DorsalOffset - wrist.position);
                 _dorsalNL = inv * normal;
@@ -218,7 +217,7 @@ public sealed class HandImageFit
         }
     }
 
-    /// <summary>Dat vi tri tam cum luc giac + phap tuyen mat cum (he co tay, met) thay cho uoc luong tu rig.</summary>
+    /// <summary>Sets the plate centre + plate normal (wrist frame, m) instead of the estimate from the rig.</summary>
     public void SetDorsalModel(Vector3 pointLocal, Vector3 normalLocal)
     {
         _dorsalL0 = pointLocal;
@@ -227,10 +226,10 @@ public sealed class HandImageFit
         _hasDorsalModel = normalLocal.sqrMagnitude > 1e-8f;
     }
 
-    /// <summary>Dat ti le kich thuoc tay so voi luc tao. HandVisual (Quest) doi kich thuoc goc ban tay khi chay;
-    /// xuong ngon (FingerChainFitter) doc kich thuoc HIEN TAI, nen long ban tay o day phai theo cung ti le --
-    /// truoc day chup 1 lan luc khoi dong (0.9) trong khi tay ve ra ~1.0 -> bo giai dung ban tay nho hon ~10%,
-    /// dat tay gan camera hon, nhin tu mat tay ao to va lech so voi tay that.</summary>
+    /// <summary>Sets the hand size relative to creation time. HandVisual (Quest) changes the hand root scale at run time;
+    /// the finger bones (FingerChainFitter) read the CURRENT size, so the palm here must follow the same scale. (It used to be
+    /// captured once at start-up (0.9) while the drawn hand became ~1.0 -> the solver built a hand ~10% smaller, placed it closer to
+    /// the camera, and seen from the eyes the virtual hand looked bigger and offset from the real hand.)</summary>
     public void SetScale(float k)
     {
         if (k <= 0f || Mathf.Abs(k - Scale) < 1e-4f) return;
@@ -241,7 +240,7 @@ public sealed class HandImageFit
         PalmLength = _palmLength0 * k;
     }
 
-    /// <summary>Tam cum luc giac cua ket qua hien tai (the gioi) -- de ve/kiem tra.</summary>
+    /// <summary>Plate centre of the current result (world), for drawing / checking.</summary>
     public bool TryGetDorsalPoint(out Vector3 point)
     {
         point = Position + Rotation * _dorsalL;
@@ -253,16 +252,16 @@ public sealed class HandImageFit
         HasSolution = false;
     }
 
-    /// <summary>Giai cho 1 anh.</summary>
-    /// <param name="camPos">Vi tri camera LUC CHUP anh.</param>
-    /// <param name="camRot">Huong camera luc chup.</param>
-    /// <param name="rayDirs">Huong tia (the gioi) tu camera qua 9 diem anh.</param>
-    /// <param name="weights">Do tin 0..1 tung diem (0 = bo qua). Can it nhat diem 0 va 5.</param>
-    /// <param name="depthPrior">Chieu sau tay theo Quest (truc nhin camera, met); &lt;= 0 = khong co.</param>
-    /// <param name="rotPrior">Huong co tay theo Quest (da lam muot); null = khong co.</param>
-    /// <param name="warm">Dap an truoc con moi (vai tram ms) -> bat dau tu do va giu gan no.</param>
-    /// <param name="dorsalState">Cum luc giac tren mu ban tay: -1 khong biet, 0 Python tim ma khong thay, 1 thay.</param>
-    /// <param name="dorsalRayDir">Tia qua tam cum (khi dorsalState = 1).</param>
+    /// <summary>Solves one image.</summary>
+    /// <param name="camPos">Camera position AT CAPTURE TIME.</param>
+    /// <param name="camRot">Camera rotation at capture time.</param>
+    /// <param name="rayDirs">Ray directions (world) from the camera through the 9 image points.</param>
+    /// <param name="weights">Trust 0..1 of each point (0 = ignore). Points 0 and 5 are required.</param>
+    /// <param name="depthPrior">Hand depth from the Quest (camera view axis, m); &lt;= 0 = none.</param>
+    /// <param name="rotPrior">Wrist rotation from the Quest (smoothed); null = none.</param>
+    /// <param name="warm">The previous answer is recent (a few hundred ms) -> start from it and stay close to it.</param>
+    /// <param name="dorsalState">Hexagon plate on the back of the hand: -1 unknown, 0 Python searched but did not see it, 1 seen.</param>
+    /// <param name="dorsalRayDir">Ray through the plate centre (when dorsalState = 1).</param>
     public bool Solve(Vector3 camPos, Quaternion camRot, Vector3[] rayDirs, float[] weights,
                       float depthPrior, Quaternion? rotPrior, bool warm, int dorsalState = -1, Vector3 dorsalRayDir = default)
     {
@@ -314,13 +313,13 @@ public sealed class HandImageFit
         if (warm)
         {
             bestCost = RefineFrom(Position, Rotation, Angles, out bestP, out bestR, _bestA);
-            // Moi anh thu them 1 cach hieu khac (luan phien dang ngon x do nghieng): anh 2D hay co
-            // 2 dang gan giong nhau; doi khi cach moi khop RO RANG tot hon. So sanh KHONG tinh phat "khac
-            // anh truoc" -- tinh vao thi cach moi (khac han dap an dang dung) khong bao gio thang, tay ao
-            // ket mai o dang sai (truoc day so lan doi = 0 o moi ban ghi).
-            // Cong bang: ca 2 cach hieu deu giai KHONG co phat "khac anh truoc" (cach dang dung giai tiep
-            // tu cho cua no) roi moi so. Dap an dang dung bi keo ve anh truoc nen sai so anh cua no luon
-            // cao hon -- so thang voi no thi cach moi gan nhu luon thang, tay ao doi qua doi lai.
+            // Each image also tries one other interpretation (cycling finger seed x tilt seed): a 2D image often has two
+            // similar-looking poses, and sometimes the other one is CLEARLY better. The comparison does NOT include the
+            // "differs from the previous image" penalty: with it the new interpretation (very different from the current answer)
+            // could never win and the virtual hand got stuck in a wrong pose (zero switches in every recording).
+            // Fair comparison: both interpretations are solved WITHOUT the temporal penalty (the current one continues from its own
+            // place) before comparing. The current answer is pulled towards the previous image, so its image error is always higher;
+            // comparing against it directly made the new one almost always win and the virtual hand flipped back and forth.
             int combos = FingerSeeds.GetLength(0) * TiltSeeds.Length;
             int c = _nextSeed;
             _nextSeed = (_nextSeed + 1) % combos;
@@ -355,7 +354,7 @@ public sealed class HandImageFit
         LastCost = bestCost;
         HasSolution = true;
 
-        // Sai so khop anh rieng (khong tinh rang buoc) -- de chan doan
+        // Image fit error alone (without the constraints), for diagnostics
         _baseP = Position; _baseR = Rotation;
         for (int k = 0; k < 6; k++) _x[k] = 0f;
         System.Array.Copy(Angles, 0, _x, 6, 8);
@@ -372,7 +371,7 @@ public sealed class HandImageFit
         return true;
     }
 
-    /// <summary>Dat dap an hien tai (vd de chay thu: bat dau tu dang sai kinh da chon).</summary>
+    /// <summary>Sets the current answer (e.g. for testing: start from a wrong pose the headset chose).</summary>
     public void SetSolution(Vector3 p, Quaternion r, float[] a)
     {
         Position = p;
@@ -381,7 +380,7 @@ public sealed class HandImageFit
         HasSolution = true;
     }
 
-    /// <summary>Vi tri 9 khop cua ket qua hien tai (the gioi) -- de ve/kiem tra.</summary>
+    /// <summary>The 9 joint positions of the current result (world), for drawing / checking.</summary>
     public void GetModelPoints(Vector3[] outPoints)
     {
         _baseP = Position; _baseR = Rotation;
@@ -391,7 +390,7 @@ public sealed class HandImageFit
         System.Array.Copy(_model, outPoints, Points);
     }
 
-    /// <summary>Vi tri 9 khop voi co tay (p, r) va goc ngon a[8] bat ky -- de chay thu.</summary>
+    /// <summary>The 9 joint positions for any wrist (p, r) and finger angles a[8], for testing.</summary>
     public void ComputePoints(Vector3 p, Quaternion r, float[] a, Vector3[] outPoints)
     {
         _baseP = p; _baseR = r;
@@ -403,22 +402,22 @@ public sealed class HandImageFit
 
     private Quaternion FacingCamera()
     {
-        // Khong co goi y nao: ngon tro chia len tren anh, long ban tay quay ve camera
+        // No hint at all: index finger pointing up in the image, palm facing the camera
         return Quaternion.LookRotation(_camRot * Vector3.up, -(_camRot * Vector3.forward));
     }
 
-    /// <summary>Dat tay ao theo 2 tia diem 0 va 5 + 1 dang ngon mau + 1 do nghieng mau, roi giai.</summary>
+    /// <summary>Places the virtual hand along the rays of points 0 and 5 with one finger seed and one tilt seed, then solves.</summary>
     private float TrySeed(Quaternion rotGuess, float depth, int fingerSeed, int tiltSeed, out Vector3 p, out Quaternion r)
     {
         Vector3 camFwd = _camRot * Vector3.forward;
-        // Xoay trong mat phang anh cho huong co tay -> goc ngon tro trung voi anh
+        // Rotate in the image plane so the wrist -> index base direction matches the image
         Vector3 imgDir = _camRot * new Vector3(_target[5].x - _target[0].x, _target[5].y - _target[0].y, 0f);
         Vector3 palm = Vector3.ProjectOnPlane(rotGuess * _indexRootL, camFwd);
         Quaternion rot = rotGuess;
         if (palm.sqrMagnitude > 1e-8f && imgDir.sqrMagnitude > 1e-10f)
             rot = Quaternion.FromToRotation(palm, imgDir) * rot;
-        // Huong mau: nghieng quanh truc ngang (vuong goc huong long ban tay tren anh), lat quanh
-        // truc co tay -> goc ngon tro
+        // Seed rotation: tilt about the horizontal axis (perpendicular to the palm direction in the image), turn about
+        // the wrist -> index base axis
         Vector3 across = Vector3.Cross(camFwd, imgDir);
         Vector2 seed = TiltSeeds[tiltSeed];
         if (across.sqrMagnitude > 1e-10f && seed.x != 0f)
@@ -426,7 +425,7 @@ public sealed class HandImageFit
         Vector3 palmAxis = rot * _indexRootL;
         if (palmAxis.sqrMagnitude > 1e-10f && seed.y != 0f)
             rot = Quaternion.AngleAxis(seed.y, palmAxis.normalized) * rot;
-        // Goc ngon tro nam tren tia diem 5 o chieu sau goi y
+        // Index base on the ray of point 5 at the hinted depth
         Vector3 x5 = _camPos + _camRot * (new Vector3(_target[5].x, _target[5].y, 1f) * depth);
         Vector3 p0 = x5 - rot * _indexRootL;
         for (int k = 0; k < 8; k++) _a8[k] = FingerSeeds[fingerSeed, k];
@@ -510,10 +509,10 @@ public sealed class HandImageFit
             for (int a = 0; a < 14; a++) r[k++] = 0f;
         }
 
-        // Khong be nguoc khop (ngon cai, ngon tro)
+        // No hyperextension (thumb, index)
         for (int f = 0; f < 2; f++)
             for (int a = 1; a < 4; a++) r[k++] = HyperextensionWeight * Mathf.Min(0f, x[6 + 4 * f + a]);
-        // Dang tay hoc tu tay tran (chi quyet dinh khi anh khong phan biet duoc)
+        // Pose prior learned from the bare hand (only decides when the image cannot tell)
         for (int i = 0; i < 8; i++) _poseDev[i] = x[6 + i] - Mathf.Lerp(PoseMeanOpen[i], PoseMeanPinch[i], Pinch);
         for (int i = 0; i < 8; i++)
         {
@@ -521,13 +520,13 @@ public sealed class HandImageFit
             for (int c = 0; c <= i; c++) w += PoseWhiten[i, c] * _poseDev[c];
             r[k++] = PosePriorWeight * w;
         }
-        // Cong an cua ngon tro (khop giua, khop dau)
+        // Hidden bend of the index finger (middle and distal joints)
         float hw = HiddenBendWeight * StraightOnImage;
         r[k++] = hw > 0f ? hw * HiddenBend(_indexMcpJoint, _model[6], _model[7]) : 0f;
         r[k++] = hw > 0f ? hw * HiddenBend(_model[6], _model[7], _model[8]) : 0f;
 
-        // Cum luc giac tren mu ban tay: thay -> tam cum ao trung tam cum tren anh (va mat cum khong
-        // quay han ra sau); khong thay -> mat cum khong duoc quay ve camera
+        // Hexagon plate on the back of the hand: seen -> the virtual plate centre matches the plate in the image (and the plate
+        // does not face fully away); not seen -> the plate must not face the camera
         r[k] = r[k + 1] = r[k + 2] = 0f;
         if (_dorsalState >= 0)
         {
@@ -545,8 +544,8 @@ public sealed class HandImageFit
         }
         k += 3;
 
-        // Pinch: anh thay 2 dau ngon chum -> 2 dau ngon ao phai cham nhau (anh 2D khong cho biet
-        // chieu sau tung ngon, dieu kien nay chu yeu sua chieu sau)
+        // Pinch: the image shows the two fingertips together -> the virtual fingertips must touch (a 2D image does not tell
+        // each finger's depth; this condition mostly fixes the depth)
         Vector3 gap = _model[8] - _model[4];
         float d = gap.magnitude;
         v = Pinch > 0f && d > PinchContactDistance
@@ -568,7 +567,7 @@ public sealed class HandImageFit
                Mathf.Clamp01((len - StraightLenZero) / (StraightLenFull - StraightLenZero));
     }
 
-    /// <summary>Goc gap 3D tai b (do) tru goc gap cua hinh chieu len anh -- phan gap camera khong thay.</summary>
+    /// <summary>3D bend at b (degrees) minus the bend of its projection in the image: the part of the bend the camera cannot see.</summary>
     private float HiddenBend(Vector3 a, Vector3 b, Vector3 c)
     {
         Vector3 u = b - a, w = c - b;
@@ -591,7 +590,7 @@ public sealed class HandImageFit
         for (int a = 0; a < 8; a++) x[6 + a] = Mathf.Clamp(x[6 + a], _min[a], _max[a]);
     }
 
-    // Levenberg-Marquardt, dao ham bang sai phan (giong FingerChainFitter, 14 an)
+    // Levenberg-Marquardt with finite-difference derivatives (14 unknowns)
     private float Refine(float[] x)
     {
         float cost = Evaluate(x, _r);

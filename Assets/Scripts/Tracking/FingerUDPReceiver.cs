@@ -6,57 +6,58 @@ using Oculus.Interaction;
 using UnityEngine;
 
 /// <summary>
-/// Tay gang ao: nhan diem anh tu Python (run_glove_quest_stream.py, UDP 5005) va dung tay ao TU ANH.
+/// Glove hand: receives the image points from Python (run_glove_quest_stream.py, UDP 5005) and builds the virtual
+/// hand FROM THE IMAGE.
 ///
-/// Duong du lieu:
-///   camera passthrough -> GloveLiveStreamer gui anh (kem so thu tu fid) -> Python RTMPose tim 9 diem
-///   (co tay, ngon cai, ngon tro) + cum mieng luc giac tren mu ban tay -> UDP ve day ->
-///   ImageHandSolver doi moi diem thanh 1 tia tu camera LUC CHUP va khop ban tay ao vao cac tia.
+/// Data path:
+///   passthrough camera -> GloveLiveStreamer sends the image (with a frame id, fid) -> Python RTMPose finds 9 points
+///   (wrist, thumb, index) + the hexagon plate on the back of the hand -> UDP back here ->
+///   ImageHandSolver turns each point into a ray from the camera AT CAPTURE TIME and fits the virtual hand to the rays.
 ///
-/// HandVisual (Quest) van ghi tu the tay moi khung; script nay ghi de ngay sau do. Quest chi con gop
-/// chieu sau tay (da lam muot) va la tay du phong khi Python mat tay lau.
-/// 3 ngon giua / ap ut / ut luon nam (model gang moi khong hoc 3 ngon nay).
+/// HandVisual (Quest) still writes the hand pose every frame; this script overwrites it right after. The Quest only
+/// contributes the (smoothed) hand depth and is the fallback hand when Python loses the hand for a while.
+/// The middle, ring and little fingers are always curled (the glove model does not track them).
 ///
-/// Gan cung GameObject voi HandFingerRig (StaticHandModel_Right). Object nay la con cua
-/// CenterEyeAnchor nhung KHONG gan theo dau: co tay duoc dat thang trong the gioi.
+/// Put it on the same GameObject as HandFingerRig (StaticHandModel_Right). That object is a child of CenterEyeAnchor
+/// but is NOT head-locked: the wrist is placed directly in world space.
 /// </summary>
 [RequireComponent(typeof(HandFingerRig))]
 public class FingerUDPReceiver : MonoBehaviour
 {
-    [Header("Mạng")]
+    [Header("Network")]
     [SerializeField] private int _port = 5005;
 
-    [Tooltip("Component 'Hand Visual' cung object -- dung tay NGAY SAU khi HandVisual ghi xong khop (event WhenHandVisualUpdated). " +
-             "Bo trong van chay (LateUpdate) nhung khong dam bao ghi de sau Quest.")]
+    [Tooltip("The 'Hand Visual' component on this object: the hand is built RIGHT AFTER HandVisual writes the joints (WhenHandVisualUpdated event). " +
+             "Empty still works (LateUpdate) but is not guaranteed to run after the Quest.")]
     [SerializeField] private HandVisual _handVisual;
-    [Tooltip("Tay trai hay phai -- de biet phia nao la long ban tay khi tu tim truc gap ngon.")]
+    [Tooltip("Left or right hand, to know which side is the palm when finding the finger flexion axes.")]
     [SerializeField] private bool _leftHand = false;
-    [Tooltip("BAT de chan doan: moi khung ghi 1 dong CSV vao Application.persistentDataPath/glove_diag_*.csv. " +
-             "Lay ve bang: adb pull /sdcard/Android/data/<ten goi>/files/ . Nho TAT sau khi chan doan xong.")]
+    [Tooltip("ON for diagnostics: one CSV row per frame in Application.persistentDataPath/glove_diag_*.csv (and glove_latency_*.csv). " +
+             "Copy with: adb pull /sdcard/Android/data/<package>/files/ . Turn it OFF when done.")]
     [SerializeField] private bool _logDiagnostics = false;
 
-    [Header("Mất dữ liệu")]
-    [Tooltip("Khong nhan duoc goi tin nao trong so giay nay (Python tat, mat mang...) -> coi nhu mat tay.")]
+    [Header("Data loss")]
+    [Tooltip("No packet for this many seconds (Python stopped, network lost...) -> treat the hand as lost.")]
     [SerializeField] private float _dataTimeoutSeconds = 0.5f;
-    [Tooltip("Dang CAM vat ma Python mat tay: giu tu the cuoi toi da so giay nay (thay vi tra ve tay Quest, vat tuot khoi tay).")]
+    [Tooltip("HOLDING an object when Python loses the hand: keep the last pose for up to this long (s), instead of falling back to the Quest hand and dropping the object.")]
     [SerializeField] private float _holdPoseWhileGraspingSeconds = 1.5f;
 
-    [Header("3 ngon giua / ap ut / ut")]
-    [Tooltip("BAT: 3 ngon giua/ap ut/ut LUON nam lai -- chi ngon cai + tro theo anh.")]
+    [Header("Middle, ring and little fingers")]
+    [Tooltip("ON: the middle, ring and little fingers are ALWAYS curled; only thumb and index follow the image.")]
     [SerializeField] private bool _keepOtherFingersClosed = true;
-    [Tooltip("Goc nam cua 3 ngon do (do): gap khop goc / giua / dau.")]
+    [Tooltip("Curl angles of those fingers (degrees): base / middle / distal joint flexion.")]
     [SerializeField] private Vector3 _closedFingerAngles = new Vector3(75f, 95f, 60f);
 
-    // Ngon cai(0) va tro(1) do ImageHandSolver dung; 3 ngon con lai luon nam.
+    // Thumb (0) and index (1) are built by ImageHandSolver; the other three are always curled.
     private const int NumLiveTrackedFingers = 2;
 
     private HandFingerRig _rig;
-    private Transform[][] _fingerJoints; // [0]=cai, [1]=tro, [2]=giua, [3]=ap ut, [4]=ut
-    private FingerChainFitter[] _fitters; // dong hoc tung ngon (ImageHandSolver dung ngon cai + tro)
+    private Transform[][] _fingerJoints; // [0] thumb, [1] index, [2] middle, [3] ring, [4] little
+    private FingerChainFitter[] _fitters; // per-finger kinematics (ImageHandSolver uses thumb + index)
     private Transform _wrist;
     private ImageHandSolver _imageSolver;
 
-    // --- Du lieu UDP (luong nhan ghi, luong chinh doc trong _lock) ---
+    // --- UDP data (written by the receive thread, read by the main thread under _lock) ---
     private readonly object _lock = new object();
     private volatile bool _dataValid;
     private volatile bool _packetArrived;
@@ -66,7 +67,7 @@ public class FingerUDPReceiver : MonoBehaviour
     private bool _latestPixelValid;
     private int _latestPixelFid;
     private Vector2 _latestDorsalUV;
-    private int _latestDorsal = -1; // -1 Python khong bao, 0 khong thay cum luc giac, 1 thay
+    private int _latestDorsal = -1; // -1 Python did not report it, 0 hexagon plate not seen, 1 seen
     private float _latestDorsalArea;
 
     private UdpClient _udpClient;
@@ -78,8 +79,8 @@ public class FingerUDPReceiver : MonoBehaviour
     private bool _packetThisFrame;
     private Transform _thumbTipCache;
 
-    // Tu the tay THEO QUEST (truoc khi ghi de) -- GloveLiveStreamer dung lam goi y cho Python,
-    // ImageHandSolver dung lam chieu sau goi y / tay du phong.
+    // Hand pose FROM THE QUEST (before it is overwritten): GloveLiveStreamer uses it as the hint for Python,
+    // ImageHandSolver as the depth hint / fallback hand.
     private Vector3 _rawCenter, _rawWrist;
     private Quaternion _rawWristRot = Quaternion.identity;
     private bool _hasRaw;
@@ -88,14 +89,15 @@ public class FingerUDPReceiver : MonoBehaviour
     private bool _hasAligned;
 
     private System.IO.StreamWriter _diag;
-    private readonly System.Text.StringBuilder _diagLine = new System.Text.StringBuilder(1400); // dung lai moi khung
+    private readonly System.Text.StringBuilder _diagLine = new System.Text.StringBuilder(1400); // reused every frame
     private GloveLiveStreamer _streamer;
     private FingertipSurfaceConstraint _constraint;
     private GloveWristStabilizer _wristStabilizer;
 
-    // --- Do tre tung khau (20/10): moi anh co ket qua 1 dong glove_latency_*.csv (cung _logDiagnostics) ---
-    // Luong nhan ghi luc goi tin toi + phan "tm:" Python gui kem; luong chinh ghep voi moc thoi gian tren kinh
-    // (GloveLiveStreamer.TryGetFrameTimings) va luc ImageHandSolver lay ket qua. tools/latency_breakdown.py doc file nay.
+    // --- Per-stage latency: one glove_latency_*.csv row per image result (with _logDiagnostics) ---
+    // The receive thread records when the packet arrived + the "tm:" part Python sends; the main thread joins that with the
+    // headset timestamps (GloveLiveStreamer.TryGetFrameTimings) and the moment ImageHandSolver picks the result.
+    // tools/latency_breakdown.py reads this file.
     private struct PacketTiming { public int Fid; public double Arrive; public string Py; }
     private readonly System.Collections.Concurrent.ConcurrentQueue<PacketTiming> _timingQueue =
         new System.Collections.Concurrent.ConcurrentQueue<PacketTiming>();
@@ -104,7 +106,7 @@ public class FingerUDPReceiver : MonoBehaviour
     private readonly int[] _pickFid = new int[PickHistory];
     private readonly double[] _pickTime = new double[PickHistory];
     private int _lastPickFid;
-    private const int PyTimingFields = 11; // so truong trong "tm:" (run_glove_quest_stream.py)
+    private const int PyTimingFields = 11; // number of fields in "tm:" (run_glove_quest_stream.py)
     private System.IO.StreamWriter _latencyLog;
 
     private void Awake()
@@ -121,7 +123,7 @@ public class FingerUDPReceiver : MonoBehaviour
         CreateFitters();
     }
 
-    /// <summary>Tao dong hoc tung ngon tu tu the nghi cua rig, roi khoi tao ImageHandSolver.</summary>
+    /// <summary>Creates each finger's kinematics from the rig's rest pose, then initialises ImageHandSolver.</summary>
     private void CreateFitters()
     {
         _wrist = _rig.indexProximal != null ? _rig.indexProximal.parent : null;
@@ -167,8 +169,8 @@ public class FingerUDPReceiver : MonoBehaviour
         _latencyLog = null;
     }
 
-    /// <summary>Tong goc gap (do) cua 1 ngon (0 = duoi thang) -- de uoc luong muc co cua actuator.
-    /// f: 0 = cai, 1 = tro...</summary>
+    /// <summary>Total flexion (degrees) of one finger (0 = straight), to estimate how far the actuator is bent.
+    /// f: 0 = thumb, 1 = index...</summary>
     public float FingerFlexionDegrees(int f)
     {
         if (_fitters == null || f < 0 || f >= _fitters.Length || _fitters[f] == null) return 0f;
@@ -176,8 +178,8 @@ public class FingerUDPReceiver : MonoBehaviour
         return a[1] + a[2] + a[3];
     }
 
-    /// <summary>Tam ban tay (khop goc ngon giua) va co tay THEO QUEST, chua bi ghi de theo anh.
-    /// GloveLiveStreamer dung de tinh goi y vi tri cho Python.</summary>
+    /// <summary>Hand centre (middle finger base joint) and wrist FROM THE QUEST, before being overwritten from the image.
+    /// GloveLiveStreamer uses it to compute the position hint for Python.</summary>
     public bool TryGetRawHandPose(out Vector3 center, out Vector3 wrist)
     {
         center = _rawCenter;
@@ -185,8 +187,8 @@ public class FingerUDPReceiver : MonoBehaviour
         return _hasRaw;
     }
 
-    /// <summary>Diem anh moi nhat (cho ImageHandSolver). false = goi tin moi nhat khong co diem hop le.
-    /// dorsal: -1 Python khong bao, 0 khong thay cum luc giac tren mu ban tay, 1 thay (dorsalUV).</summary>
+    /// <summary>Latest image points (for ImageHandSolver). false = the latest packet has no valid points.
+    /// dorsal: -1 Python did not report it, 0 the hexagon plate on the back of the hand was not seen, 1 seen (dorsalUV).</summary>
     public bool TryGetPixelPoints(out int frameId, Vector2[] uv, float[] conf, out int dorsal, out Vector2 dorsalUV)
     {
         lock (_lock)
@@ -199,7 +201,7 @@ public class FingerUDPReceiver : MonoBehaviour
             Array.Copy(_latestConf, conf, HandImageFit.Points);
             if (frameId != _lastPickFid)
             {
-                // Lan dau tay ao lay ket qua anh nay (cot pick_ms trong glove_latency)
+                // First time the virtual hand takes this image result (pick_ms column in glove_latency)
                 _lastPickFid = frameId;
                 _pickFid[frameId % PickHistory] = frameId;
                 _pickTime[frameId % PickHistory] = GloveLiveStreamer.ClockNow;
@@ -208,7 +210,7 @@ public class FingerUDPReceiver : MonoBehaviour
         }
     }
 
-    // ===== NHAN UDP =====
+    // ===== UDP RECEIVE =====
 
     private void ReceiveLoop()
     {
@@ -218,19 +220,19 @@ public class FingerUDPReceiver : MonoBehaviour
             var remoteEP = new IPEndPoint(IPAddress.Any, _port);
             while (_running)
             {
-                byte[] data = _udpClient.Receive(ref remoteEP); // chan toi khi co goi tin
+                byte[] data = _udpClient.Receive(ref remoteEP); // blocks until a packet arrives
                 double arrive = GloveLiveStreamer.ClockNow;
                 ParseAndStore(System.Text.Encoding.UTF8.GetString(data), arrive);
             }
         }
         catch (SocketException)
         {
-            // Xay ra binh thuong khi dong socket luc OnDisable -- bo qua.
+            // Normal when the socket is closed in OnDisable -- ignore.
         }
     }
 
-    /// <summary>Goi tin dang "valid:1,fid:123,pv:x|y;...,pc:c;...,dv:x|y,da:0.07,tm:..." "valid" luon dung dau;
-    /// "tm" (tuy chon) = thoi gian tung khau ben Python cho anh nay. arrive = luc goi tin toi (ClockNow).</summary>
+    /// <summary>Packet format "valid:1,fid:123,pv:x|y;...,pc:c;...,dv:x|y,da:0.07,tm:...", "valid" always first;
+    /// "tm" (optional) = Python's per-stage times for this image. arrive = when the packet arrived (ClockNow).</summary>
     private void ParseAndStore(string msg, double arrive)
     {
         _packetArrived = true;
@@ -284,10 +286,10 @@ public class FingerUDPReceiver : MonoBehaviour
                 !float.TryParse(xy[1], System.Globalization.NumberStyles.Float, inv, out float v))
                 return;
             _latestUV[i] = new Vector2(u, v);
-            _latestConf[i] = 1f; // Python khong gui "pc" -> tin het
+            _latestConf[i] = 1f; // Python sent no "pc" -> trust all points
         }
         _latestPixelValid = true;
-        _latestPixelFid = _latestFrameId; // "fid" dung truoc "pv" trong goi tin
+        _latestPixelFid = _latestFrameId; // "fid" comes before "pv" in the packet
     }
 
     private void ParsePixelConf(string value)
@@ -298,7 +300,7 @@ public class FingerUDPReceiver : MonoBehaviour
                 _latestConf[i] = c;
     }
 
-    // ===== DUNG TAY =====
+    // ===== BUILD THE HAND =====
 
     private void Update()
     {
@@ -310,7 +312,7 @@ public class FingerUDPReceiver : MonoBehaviour
         }
     }
 
-    // Chay moi khung du co gan _handVisual hay khong (duong bao dam neu event khong ban).
+    // Runs every frame whether or not _handVisual is set (the safe path if the event does not fire).
     private void LateUpdate()
     {
         ApplyHand();
@@ -321,7 +323,7 @@ public class FingerUDPReceiver : MonoBehaviour
         }
     }
 
-    /// <summary>Goi ngay sau khi HandVisual ghi xong khop (va lai trong LateUpdate).</summary>
+    /// <summary>Called right after HandVisual has written the joints (and again in LateUpdate).</summary>
     private void ApplyHand()
     {
         if (_wrist == null) return;
@@ -331,13 +333,13 @@ public class FingerUDPReceiver : MonoBehaviour
         bool questUpdated = CaptureRawPose();
         bool trusted = _dataValid && Time.time - _lastDataTime <= _dataTimeoutSeconds;
         if (trusted) _lastTrustedTime = Time.time;
-        // Dang cam vat ma mat du lieu ngan: giu tu the lau hon (khong de vat tuot)
+        // Holding an object during a short data loss: keep the pose longer (so the object is not dropped)
         bool holdForGrasp = !trusted && Time.time - _lastTrustedTime <= _holdPoseWhileGraspingSeconds && IsGrasping();
         _imageSolver.Drive(questUpdated, _rawWrist, _rawWristRot, trusted, holdForGrasp);
         MarkAligned();
     }
 
-    /// <summary>Ep 3 ngon giua/ap ut/ut ve dang nam -- moi lan ghi xuong (HandVisual ghi lai ca 5 ngon moi khung).</summary>
+    /// <summary>Curls the middle, ring and little fingers, on every write (HandVisual rewrites all five fingers every frame).</summary>
     private void KeepOtherFingersClosed()
     {
         if (!_keepOtherFingersClosed || _fitters == null) return;
@@ -350,8 +352,8 @@ public class FingerUDPReceiver : MonoBehaviour
         }
     }
 
-    /// <summary>Co tay khac tu the minh vua dat = Quest vua ghi -> luu tu the THEO QUEST (true).
-    /// Giong nhau = khung nay da dung tay roi (ham chay 2 lan moi khung).</summary>
+    /// <summary>The wrist differs from the pose we just set = the Quest has just written it -> store the pose FROM THE QUEST (true).
+    /// Same pose = the hand was already built this frame (this runs twice per frame).</summary>
     private bool CaptureRawPose()
     {
         if (_hasAligned && Quaternion.Angle(_wrist.rotation, _alignedWristRot) < 0.01f &&
@@ -370,7 +372,7 @@ public class FingerUDPReceiver : MonoBehaviour
         _hasAligned = true;
     }
 
-    /// <summary>Ban tay nay dang cam vat nao do khong.</summary>
+    /// <summary>Whether this hand is holding any object.</summary>
     private bool IsGrasping()
     {
         if (_holdPoseWhileGraspingSeconds <= 0f) return false;
@@ -387,9 +389,9 @@ public class FingerUDPReceiver : MonoBehaviour
         return false;
     }
 
-    // ===== CHAN DOAN =====
+    // ===== DIAGNOSTICS =====
 
-    /// <summary>Ghi 1 dong chan doan cho khung hien tai (xem _logDiagnostics).</summary>
+    /// <summary>Writes one diagnostics row for the current frame (see _logDiagnostics).</summary>
     private void WriteDiagnostics()
     {
         if (_fitters == null || _wrist == null) return;
@@ -406,22 +408,22 @@ public class FingerUDPReceiver : MonoBehaviour
             head.Append(",dorsal,du,dv,da");
             for (int f = 0; f < NumLiveTrackedFingers; f++) for (int j = 0; j < 4; j++) head.Append($",a{f}_{j}");
             head.Append(",solv,sfid,serr,scost,sdepth,szprior,sswitch,sms,spinch,sdorsal,hscale");
-            // Hieu nang: do dai khung truoc (ms), luong chinh cua lan gui anh gan nhat, rang buoc ngon + bong (khung truoc)
+            // Performance: previous frame time (ms), main-thread time of the latest image send, finger constraint + ball (previous frame)
             head.Append(",dtms,streamms,conms,sqms");
-            // Muc tin ket qua anh gan nhat (ImageHandSolver) + trang thai kep bong cua tay nay (FingertipSurfaceConstraint.PinchStatus)
+            // Trust of the latest image result (ImageHandSolver) + this hand's pinch state (FingertipSurfaceConstraint.PinchStatus)
             head.Append(",trust,pinchst");
-            // Do tre + tay ra khoi khung (18/10): tuoi anh vua giai, co tay hien lech ket qua giai (bo loc), muc tin
-            // co tay / ngon cai / ngon tro, so diem sat mep, trang thai (0 du / 1 mot phan / 2 mat), gate luc, ngon giu dang
+            // Latency + hand leaving the frame: age of the solved image, shown wrist vs solved result (filter lag), trust of
+            // wrist / thumb / index, number of edge points, state (0 full / 1 partial / 2 lost), force gate, frozen fingers
             head.Append(",age_ms,lag_mm,lag_deg,wtrust,ttrust,itrust,edgepts,hstate,fweight,tfrozen,ifrozen");
-            // Do tre tay ao so voi tay that (19/10): dong ho chung realtimeSinceStartup cho dong nay (rt), tuoi anh tinh tu luc
-            // phoi sang, camera -> Unity, va co tay giai THO cua anh gan nhat kem luc phoi sang anh do (sexp; 0 = khong biet).
-            // tools/latency_diag.py so (rt, wx..wz) voi (sexp, sx..sz) de tim do tre.
+            // Virtual vs real hand latency: shared clock realtimeSinceStartup for this row (rt), image age since exposure,
+            // camera -> Unity, and the RAW solved wrist of the latest image with that image's exposure time (sexp; 0 = unknown).
+            // tools/latency_diag.py compares (rt, wx..wz) with (sexp, sx..sz) to find the latency.
             head.Append(",rt,exp_age_ms,cam_ms,sexp,sx,sy,sz");
-            // Co tay Quest THO (truoc GloveWristStabilizer) -- thu kha thi bu tre bang Quest (20/10): vi tri the gioi, khung
-            // nay Quest co theo doi khong, do tin cay cao khong, luc nhan (realtime). tools/quest_raw_feasibility.py doc cac cot nay.
+            // RAW Quest wrist (before GloveWristStabilizer), to test whether the Quest could compensate latency: world position,
+            // whether the Quest tracked the hand this frame, high confidence, receive time (realtime). Read by tools/quest_raw_feasibility.py.
             head.Append(",qrx,qry,qrz,qvalid,qconf,qrt");
             _diag.WriteLine(head.ToString());
-            Debug.Log($"[FingerUDPReceiver] Ghi chan doan vao {path}", this);
+            Debug.Log($"[FingerUDPReceiver] Writing diagnostics to {path}", this);
         }
 
         Transform view = transform.parent != null ? transform.parent : transform;
@@ -491,13 +493,13 @@ public class FingerUDPReceiver : MonoBehaviour
           .Append(',').Append(q != null && q.RawHighConfidence ? 1 : 0)
           .Append(',').Append((q != null ? q.RawTime : 0f).ToString("F4", inv));
         _diag.WriteLine(sb);
-        if (Time.frameCount % 72 == 0) _diag.Flush(); // khong mat du lieu neu ung dung bi tat ngang
+        if (Time.frameCount % 72 == 0) _diag.Flush(); // no data lost if the app is closed abruptly
     }
 
-    /// <summary>Ghi glove_latency: moi anh co ket qua 1 dong, khi tay ao da lay ket qua do (hoac 0.5 s sau khi toi
-    /// ma chua lay -- anh moi hon da ve truoc, pick_ms = -1). Moi cot la ms giua 2 moc lien tiep:
-    /// phoi sang -> xin anh (cam) -> GPU tra anh (rb) -> luong phu bat dau nen (wq) -> nen xong (enc) -> gui xong (send)
-    /// -> ket qua ve toi kinh (rtt; gom WiFi di + xep hang + Python + WiFi ve) -> tay ao lay (pick).</summary>
+    /// <summary>Writes glove_latency: one row per image result, once the virtual hand has taken it (or 0.5 s after it arrived
+    /// without being taken -- a newer image came first, pick_ms = -1). Each column is the ms between two consecutive stamps:
+    /// exposure -> image requested (cam) -> GPU returns the image (rb) -> worker thread starts encoding (wq) -> encoded (enc) -> sent (send)
+    /// -> result back on the headset (rtt; includes Wi-Fi out + queueing + Python + Wi-Fi back) -> taken by the virtual hand (pick).</summary>
     private void WriteLatencyLog()
     {
         while (_timingQueue.TryDequeue(out PacketTiming p)) _pendingTimings.Add(p);
@@ -511,7 +513,7 @@ public class FingerUDPReceiver : MonoBehaviour
             _latencyLog.WriteLine("fid,arr_s,jpeg_kb,cam_ms,rb_ms,wq_ms,enc_ms,send_ms,rtt_ms," +
                                   "py_blocked,py_wait_ms,py_xfer_ms,py_decode_ms,py_infer_ms,py_ninfer,py_other_ms,py_pc_ms," +
                                   "py_prev_cycle_ms,py_prev_tail_ms,py_dropped,pick_ms,total_ms");
-            Debug.Log($"[FingerUDPReceiver] Ghi do tre tung khau vao {path}", this);
+            Debug.Log($"[FingerUDPReceiver] Writing per-stage latency to {path}", this);
         }
         if (_streamer == null) _streamer = FindAnyObjectByType<GloveLiveStreamer>();
         double now = GloveLiveStreamer.ClockNow;
@@ -524,7 +526,7 @@ public class FingerUDPReceiver : MonoBehaviour
             bool picked = _pickFid[ps] == p.Fid;
             if (!picked && now - p.Arrive < 0.5)
             {
-                _pendingTimings[keep++] = p; // cho tay ao lay ket qua nay
+                _pendingTimings[keep++] = p; // wait for the virtual hand to take this result
                 continue;
             }
             GloveLiveStreamer.FrameTimings t = default;

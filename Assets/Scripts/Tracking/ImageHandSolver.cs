@@ -1,132 +1,136 @@
 using UnityEngine;
 
 /// <summary>
-/// Dung tay gang ao TU ANH camera (xem HandImageFit): moi anh Python gui ve -> doi 9 diem thanh 9 tia
-/// tu camera luc chup -> giai 1 lan -> giua 2 anh chi truot muot toi ket qua moi (KHONG giai lai theo
-/// co tay Quest dang rung). Python mat tay: giu tu the cuoi _holdSeconds roi tra dan ve tay Quest.
+/// Builds the virtual glove hand FROM THE CAMERA IMAGE (see HandImageFit): for each image result from Python, the
+/// 9 points become 9 rays from the camera at capture time -> solve once -> between two images the hand only glides
+/// smoothly towards the new result (it is NOT re-solved against the jittery Quest wrist). When Python loses the hand,
+/// the last pose is kept for _holdSeconds, then the hand blends back to the Quest hand.
 ///
-/// FingerUDPReceiver goi Drive() moi khi HandVisual ghi xong khop. Tat component nay = tay Quest thuan
-/// (chi 3 ngon giua/ap ut/ut van nam).
+/// FingerUDPReceiver calls Drive() every time HandVisual has written the joints. Disabling this component gives the
+/// plain Quest hand (only the middle, ring and little fingers stay curled).
+///
+/// Smoothing, per image result: a One Euro filter (strong when the hand is still, light when it moves), then two
+/// display smoothing stages per rendered frame, plus extrapolation along the filtered velocity to make up for their lag.
+/// _betaPosition 200 and _displaySeconds 0.015 were chosen with tools/filter_sim.py on recorded logs: lower latency
+/// with no visible jitter.
 /// </summary>
 public sealed class ImageHandSolver : MonoBehaviour
 {
-    [Tooltip("Moi tang truot muot (co 2 tang noi tiep, giay) tu ket qua da loc sang khung hinh -- de tay chay DEU giua 2 anh " +
-             "(18 anh/giay), phan chong rung do bo loc One-Euro ben duoi lo. 1 tang 0.025 (ban 03/10 17:00) don chuyen dong vao " +
-             "1-2 khung sau moi anh -> giat khi nhac vat. Truoc 03/10: 1 tang 0.06 + loc o Python (tre ~115 ms). " +
-             "20/10: 0.02 -> 0.015 (tools/filter_sim.py tren glove_diag 12:17: cung beta 200 tay ao bot ~18 ms tre, giat khi chay " +
-             "0.45 -> 0.69 mm; 0.01 bot 26 ms nhung giat x2.5).")]
+    [Tooltip("Time constant (s) of EACH of the two chained display smoothing stages, from the filtered result to the rendered frame, so the hand " +
+             "moves EVENLY between images (~18 images/s) and hides what the One Euro filter lets through. 0.015 s: about 18 ms less latency " +
+             "than 0.02 with jitter while moving 0.45 -> 0.69 mm (tools/filter_sim.py); 0.01 saves 26 ms but jitters 2.5x more.")]
     [SerializeField] private float _displaySeconds = 0.015f;
-    [Header("Loc One-Euro (moi lan giai): tay dung yen -> loc manh, tay chay -> bam nhanh")]
-    [Tooltip("Tan so cat khi tay dung yen (Hz). Nho = muot hon nhung tre hon.")]
+    [Header("One Euro filter (per solve): hand still -> strong smoothing, hand moving -> follows quickly")]
+    [Tooltip("Cutoff frequency with the hand still (Hz). Lower = smoother but more lag.")]
     [SerializeField] private float _minCutoff = 0.7f;
-    [Tooltip("Tan so cat tang them theo toc do co tay (Hz moi m/s). 20/10: 80 -> 200 (bam nhanh hon luc tay bat dau chay, " +
-             "rung dung yen 1.07 -> 1.15 mm mo phong; minCutoff gan nhu khong anh huong do tre).")]
+    [Tooltip("Extra cutoff per unit of wrist speed (Hz per m/s). 200 follows faster when the hand starts moving " +
+             "(simulated still-hand jitter 1.07 -> 1.15 mm vs 80); minCutoff barely affects latency.")]
     [SerializeField] private float _betaPosition = 200f;
-    [Tooltip("Tan so cat tang them theo toc do xoay co tay (Hz moi do/s).")]
+    [Tooltip("Extra cutoff per unit of wrist rotation speed (Hz per degree/s).")]
     [SerializeField] private float _betaRotation = 0.1f;
-    [Tooltip("Tan so cat tang them theo toc do gap khop ngon (Hz moi do/s), tinh rieng tung khop.")]
+    [Tooltip("Extra cutoff per unit of finger joint speed (Hz per degree/s), per joint.")]
     [SerializeField] private float _betaAngle = 0.05f;
-    [Tooltip("Tan so cat khi uoc luong toc do (Hz).")]
+    [Tooltip("Cutoff used when estimating speed (Hz).")]
     [SerializeField] private float _speedCutoff = 1f;
-    [Tooltip("Giua 2 anh, day vi tri co tay di tiep theo van toc bay nhieu phan (0 = dung yen cho anh moi). " +
-             "1 = di deu theo van toc -> bu lai phan tre cua 2 tang truot muot.")]
+    [Tooltip("Between two images, push the wrist forward along its velocity by this fraction (0 = wait for the next image). " +
+             "1 = move on at the current velocity -> makes up for the lag of the two display smoothing stages.")]
     [SerializeField] private float _extrapolate = 1f;
-    [Tooltip("Nhu tren nhung cho huong co tay + goc ngon (de 1 thi rung xoay luc dung yen tang ro).")]
+    [Tooltip("Same as above, for the wrist rotation and finger angles (1 makes the still hand's rotation jitter clearly worse).")]
     [SerializeField] private float _extrapolateRotation = 0.5f;
-    [Tooltip("Ngoai suy toi da bay nhieu giay sau lan giai cuoi (anh den ~0.056 s/anh).")]
+    [Tooltip("Extrapolate at most this long after the last solve (images arrive about every 0.056 s).")]
     [SerializeField] private float _maxExtrapolateSeconds = 0.06f;
-    [Header("Do tin cay tung ket qua (chong giat khi 2 ngon sap cham nhau)")]
-    [Tooltip("Sai so anh (theo long ban tay) duoi muc nay = tin han; tren _errBad = gan nhu bo. glove_diag 04/10 16:36: tay tu do " +
-             "TB 0.042, luc 2 ngon sap cham 0.147 -- co tay nhay 26-78 do, ngon cai 10-18 do moi lan, One-Euro tuong tay chay nhanh nen cho qua.")]
+    [Header("Trust of each result (no jumps when the two fingertips nearly touch)")]
+    [Tooltip("Image error (in palm lengths) below this = fully trusted; above _errBad = almost ignored. Measured: free hand mean 0.042, " +
+             "fingertips about to touch 0.147, where the wrist jumped 26-78 degrees and the thumb 10-18 degrees per result and the One Euro filter took it for fast motion.")]
     [SerializeField] private float _errGood = 0.07f;
     [SerializeField] private float _errBad = 0.20f;
-    [Tooltip("Huong co tay nhay hon muc nay (do) so voi ket qua da loc ma ket qua ngay truoc KHONG xac nhan -> chi tin 20% " +
-             "(che do moi _trustRejectsNotSlows: bo han ket qua do).")]
+    [Tooltip("Wrist rotation jumping more than this (degrees) from the filtered result, NOT confirmed by the previous result -> trusted only 20% " +
+             "(with _trustRejectsNotSlows: the result is dropped).")]
     [SerializeField] private float _jumpDegrees = 15f;
-    [Tooltip("2 ket qua lien tiep lech nhau duoi muc nay (do, cach nhau < 0.2 s) = xac nhan dong tac that (vd xoay tay nhanh).")]
+    [Tooltip("Two consecutive results within this (degrees, less than 0.2 s apart) = a real motion is confirmed (e.g. a fast wrist turn).")]
     [SerializeField] private float _confirmDegrees = 10f;
-    [Tooltip("Do tin cay trung binh cac diem cua 1 ngon (model Python) tu muc thap -> cao: duoi = giu nguyen dang ngon, tren = tin han. " +
-             "Luc 2 ngon sap cham, diem ngon cai chi 0.2-0.35 (nhin ro: 0.6-1.2).")]
+    [Tooltip("Mean confidence of a finger's points (Python model), from low to high: below = keep the finger's pose, above = fully trusted. " +
+             "With the fingertips about to touch, thumb points score only 0.2-0.35 (clearly visible: 0.6-1.2).")]
     [SerializeField] private float _confLow = 0.25f;
     [SerializeField] private float _confHigh = 0.6f;
-    [Tooltip("Muc tin toi thieu moi ket qua (de khong dung han khi model mai khong chac). Chi dung o che do cu.")]
+    [Tooltip("Minimum trust of a result (so the hand never fully stops while the model stays unsure). Old mode only.")]
     [SerializeField] private float _minTrust = 0.03f;
-    [Tooltip("Ket qua tin duoi muc nay KHONG tinh la 'thay tay' (tay o mep khung / bi khuat -> model doan sai, glove_diag 13/10: " +
-             "fit 0.03 lien tuc ma w van 1). Chi toan ket qua kem -> giu dang tot cuoi _holdSeconds roi tra ve tay Quest, gate " +
-             "cua GloveForceEsp32Output ve 0. Sau khi mat tay, ket qua DAU TIEN phai dat muc nay moi duoc lay. 0 = nhu cu.")]
+    [Tooltip("Results trusted below this do NOT count as 'hand seen' (hand at the frame edge / occluded -> the model guesses wrong; " +
+             "seen as a fit of 0.03 for long periods while the weight stayed 1). Only bad results -> keep the last good pose for _holdSeconds, then the Quest hand, " +
+             "and GloveForceEsp32Output's force gate goes to 0. After losing the hand, the FIRST result must reach this to be used. 0 = old behaviour.")]
     [SerializeField] private float _minGoodTrust = 0.1f;
 
-    [Header("Do tre: ket qua kem thi BO, ket qua dat thi bam NHANH (18/10)")]
-    [Tooltip("BAT: muc tin chi dung de LOAI ket qua (duoi _rejectBelow = bo qua), ket qua duoc nhan thi bam voi toc do it nhat " +
-             "_acceptFloor. Co tay chi xet sai so anh + 3 diem long ban tay (co tay, goc ngon cai, goc ngon tro) -- khong bi ngon cai " +
-             "bi khuat keo cham theo.\n\nTAT (cach cu): toc do bam NHAN voi muc tin -> luc 2 ngon sap cham (tin ~0.1) tay ao bo toi " +
-             "cho moi trong ~2 s.")]
+    [Header("Latency: drop bad results, follow accepted results QUICKLY")]
+    [Tooltip("ON: trust is only used to REJECT results (below _rejectBelow = ignored); accepted results are followed at least at " +
+             "_acceptFloor. The wrist only looks at the image error + the 3 palm points (wrist, thumb base, index base), so an occluded thumb " +
+             "does not slow it down.\n\nOFF (old mode): follow speed MULTIPLIED by trust -> with the fingertips about to touch (trust ~0.1) the virtual hand " +
+             "lagged behind for about 2 s.")]
     [SerializeField] private bool _trustRejectsNotSlows = true;
-    [Tooltip("Ket qua (co tay hoac tung ngon) tin duoi muc nay thi bo, khong cap nhat. Bang _minGoodTrust: duoi muc do coi nhu khong thay tay.")]
+    [Tooltip("Results (wrist or each finger) trusted below this are dropped, no update. Same as _minGoodTrust: below it the hand counts as not seen.")]
     [SerializeField] private float _rejectBelow = 0.1f;
-    [Tooltip("Ket qua duoc nhan bam toi it nhat bang muc nay so voi ket qua tin han (1 = luon bam nhu ket qua tot nhat).")]
+    [Tooltip("Accepted results are followed at least this fast compared with a fully trusted result (1 = always like the best result).")]
     [Range(0.1f, 1f)]
     [SerializeField] private float _acceptFloor = 0.6f;
 
-    [Header("Bu do tre bang chuyen dong Quest (THU NGHIEM, mac dinh tat)")]
-    [Tooltip("BAT: vi tri co tay = ket qua anh + doan tay Quest da di ke tu luc CHUP anh do -> bu ca phan tre WiFi + Python. " +
-             "Quest nhin tay deo gang rung chieu sau 4-10 cm, nen chi bat sau khi glove_diag cho thay chuyen dong Quest du muot.")]
+    [Header("Latency compensation from Quest motion (EXPERIMENTAL, off by default)")]
+    [Tooltip("ON: wrist position = image result + how far the Quest hand has moved since that image was CAPTURED -> compensates the Wi-Fi + Python delay. " +
+             "The Quest's depth for the gloved hand jitters 4-10 cm, so only turn this on once glove_diag shows the Quest motion is smooth enough.")]
     [SerializeField] private bool _useQuestMotion = false;
-    [Tooltip("Chi lay phan chuyen dong Quest VUONG GOC voi tia nhin camera (bo phan xa/gan -- phan Quest rung nhieu nhat).")]
+    [Tooltip("Only use the part of the Quest motion PERPENDICULAR to the camera ray (drop near/far, where the Quest jitters most).")]
     [SerializeField] private bool _questMotionLateralOnly = true;
-    [Tooltip("Doan bu toi da (met) -- chan Quest nhay sai.")]
+    [Tooltip("Maximum compensation (m), to block wrong Quest jumps.")]
     [SerializeField] private float _questMotionMaxMeters = 0.15f;
 
-    [Header("Tay ra khoi khung camera (18/10)")]
-    [Tooltip("BAT: diem Python gui ve nam trong dai mep anh hoac ngoai anh (model DOAN, khong nhin thay) -> trong so 0 khi giai. " +
-             "Ngon con it hon _minFingerPoints diem trong khung -> GIU dang tot cuoi cua ngon do. Ca tay it hon _minInFramePoints " +
-             "diem (hoac mat ca 3 diem long ban tay) -> khong giai, coi nhu khong thay tay.")]
+    [Header("Hand leaving the camera frame")]
+    [Tooltip("ON: points from Python in the image edge band or outside the image (the model GUESSES them) get weight 0 in the solve. " +
+             "A finger with fewer than _minFingerPoints points in frame KEEPS its last good pose. The whole hand with fewer than _minInFramePoints " +
+             "points (or none of the 3 palm points) -> no solve, the hand counts as not seen.")]
     [SerializeField] private bool _rejectEdgePoints = true;
-    [Tooltip("Dai mep anh (phan cua chieu rong / cao) coi la 'sat mep, khong tin'.")]
+    [Tooltip("Image edge band (fraction of width / height) treated as 'too close to the edge, not trusted'.")]
     [Range(0f, 0.15f)]
     [SerializeField] private float _edgeMargin = 0.03f;
-    [Tooltip("Ca tay can it nhat bay nhieu diem (tren 9) trong khung moi giai.")]
+    [Tooltip("The hand needs at least this many points (of 9) in frame to be solved.")]
     [Range(3, 9)]
     [SerializeField] private int _minInFramePoints = 5;
-    [Tooltip("Moi ngon (4 diem) can it nhat bay nhieu diem trong khung, khong thi giu dang cu cua ngon do.")]
+    [Tooltip("Each finger (4 points) needs at least this many points in frame, otherwise it keeps its previous pose.")]
     [Range(1, 4)]
     [SerializeField] private int _minFingerPoints = 2;
-    [Tooltip("BAT: mat tay lau -> chi CO TAY tra ve Quest, ngon cai + tro GIU dang tot cuoi. TAT (cu): ca ngon cung ve tay Quest -- " +
-             "Quest khong nhin duoc ngon deo gang nen ngon ao bi van meo.")]
+    [Tooltip("ON: when the hand is lost for long, only the WRIST goes back to the Quest; thumb and index KEEP their last good pose. OFF (old): fingers also go " +
+             "back to the Quest hand, which cannot see gloved fingers, so the virtual fingers got twisted.")]
     [SerializeField] private bool _keepFingersWhenLost = true;
-    [Tooltip("BAT: ngon cai hoac tro dang bi GIU dang (ra khoi khung) -> ForceWeight ve 0, gate luc cua GloveForceEsp32Output tat " +
-             "luc dan (khong day theo 1 ngon dang dung yen).")]
+    [Tooltip("ON: while the thumb or index pose is HELD (out of frame) -> ForceWeight goes to 0 and GloveForceEsp32Output's force gate fades " +
+             "the force out (no pushing on a finger that is frozen).")]
     [SerializeField] private bool _cutForceWhenFingerFrozen = true;
 
-    [Tooltip("Khi bo giai doi sang cach hieu khac (vd thoat khoi dang ngon gap sai), truot sang dang moi trong khoang nay (giay).")]
+    [Tooltip("When the solver switches to a different interpretation (e.g. escaping a wrongly bent finger pose), glide to the new pose over this time (s).")]
     [SerializeField] private float _switchSeconds = 0.3f;
-    [Tooltip("Python mat tay: giu tu the cuoi bay lau (giay) roi moi tra ve tay Quest.")]
+    [Tooltip("Python lost the hand: keep the last pose this long (s) before going back to the Quest hand.")]
     [SerializeField] private float _holdSeconds = 1.0f;
-    [Tooltip("Thoi gian chuyen giua tay theo anh va tay Quest (giay).")]
+    [Tooltip("Blend time between the image hand and the Quest hand (s).")]
     [SerializeField] private float _blendSeconds = 0.3f;
-    [Tooltip("Chieu sau Quest (gang moi rung 4-10 cm) duoc trung binh bay nhieu giay truoc khi lam goi y.")]
+    [Tooltip("The Quest depth (jitters 4-10 cm with the glove) is averaged over this many seconds before being used as a hint.")]
     [SerializeField] private float _depthPriorSeconds = 0.6f;
-    [Tooltip("Huong co tay Quest duoc lam muot bay nhieu giay truoc khi lam goi y (chi de chon long ban tay up/ngua).")]
+    [Tooltip("The Quest wrist rotation is smoothed over this many seconds before being used as a hint (only to choose palm up / down).")]
     [SerializeField] private float _rotPriorSeconds = 0.3f;
-    [Tooltip("Dap an truoc cu hon muc nay (giay) thi giai lai tu dau, khong bam theo no.")]
+    [Tooltip("If the previous answer is older than this (s), solve from scratch instead of starting from it.")]
     [SerializeField] private float _warmSeconds = 0.5f;
-    [Tooltip("Diem co do tin cay duoi muc nay bi bo qua.")]
+    [Tooltip("Points with a confidence below this are ignored.")]
     [SerializeField] private float _minConfidence = 0.2f;
-    [Tooltip("Trong so diem 1 (goc ngon cai sat co tay -- khong dan bang keo, model dat kem chac).")]
+    [Tooltip("Weight of point 1 (thumb base near the wrist; no tape marker there, so the model places it less reliably).")]
     [SerializeField] private float _thumbBaseWeight = 0.5f;
-    [Tooltip("Dung huong co tay Quest lam goi y (rang buoc yeu). TAT mac dinh: voi gang moi Quest hay doan NGUOC long ban tay " +
-             "(glove_diag 01/10 17:45: mu ban tay quay ve camera ma Quest bao long ban tay quay ve mat) -> keo tay ao ve dang nghieng canh.")]
+    [Tooltip("Use the Quest wrist rotation as a (weak) hint. OFF by default: with the glove the Quest often guesses the palm BACKWARDS " +
+             "(back of the hand towards the camera while the Quest reports the palm facing the eyes) -> pulls the virtual hand into a sideways tilt.")]
     [SerializeField] private bool _useQuestRotation = false;
-    [Tooltip("Dung cum mieng luc giac tren mu ban tay (Python tim theo mau) de biet ban tay lat bao nhieu. TAT tu 02/10: " +
-             "chay lai 5 ban ghi, bat len lam sai so anh tang (vd 0.056 -> 0.066), ngon giat gap doi; diem Python tim lech " +
-             "vi tri mo hinh trung binh 0.42 long ban tay (hay bat nham mau go/hop giay/chuot) -> keo co tay sai, ngon tro " +
-             "phai cong queo de bu, ro nhat khi voi tay ra xa.")]
+    [Tooltip("Use the hexagon plate on the back of the hand (found by colour in Python) to tell how far the hand is turned over. OFF: " +
+             "re-running 5 recordings with it on made the image error worse (e.g. 0.056 -> 0.066) and doubled finger jitter; the point Python finds " +
+             "is on average 0.42 palm lengths from the model position (it often picks up wood / cardboard / the mouse) -> wrong wrist, and the index " +
+             "finger bends to compensate, worst with the arm stretched out.")]
     [SerializeField] private bool _useDorsalTiles = false;
-    [Tooltip("Kich thuoc tay gang ao = kich thuoc Quest do duoc o TAY TRAI TRAN (Hand.Scale) -- 2 tay cung co, con Quest nhin " +
-             "tay deo gang thi uoc luong kich thuoc khong dang tin. Chua thay tay trai lan nao thi giu kich thuoc Quest dat.")]
+    [Tooltip("Glove hand size = the size the Quest measures for the BARE LEFT HAND (Hand.Scale); both hands are the same size, and the Quest's size " +
+             "estimate for the gloved hand is unreliable. Until the left hand has been seen, keep the size the Quest set.")]
     [SerializeField] private bool _useLeftHandScale = true;
 
-    // 3 diem long ban tay: co tay (0), goc ngon cai (1), goc ngon tro (5) -- quyet dinh vi tri/huong co tay
+    // The 3 palm points: wrist (0), thumb base (1), index base (5) -- they decide the wrist position / rotation
     private static readonly int[] PalmPoints = { 0, 1, 5 };
 
     private FingerUDPReceiver _receiver;
@@ -134,17 +138,17 @@ public sealed class ImageHandSolver : MonoBehaviour
     private Transform _wrist;
     private FingerChainFitter _thumb, _index;
     private HandImageFit _fit;
-    private Transform[] _between;      // xuong giua co tay va goc ngon (vd xuong ban tay ngon tro)
+    private Transform[] _between;      // bones between the wrist and the finger bases (e.g. the index metacarpal)
     private Quaternion[] _betweenRest;
 
     private readonly Vector2[] _uv = new Vector2[HandImageFit.Points];
     private readonly float[] _conf = new float[HandImageFit.Points];
-    private readonly float[] _confIn = new float[HandImageFit.Points]; // = _conf, diem sat mep/ngoai anh = 0
+    private readonly float[] _confIn = new float[HandImageFit.Points]; // = _conf, with points near / outside the image edge set to 0
     private readonly Vector3[] _dirs = new Vector3[HandImageFit.Points];
     private readonly float[] _w = new float[HandImageFit.Points];
 
     private int _lastFid;
-    private float _lastGoodTime = -999f;     // lan cuoi co ket qua dat _minGoodTrust
+    private float _lastGoodTime = -999f;     // last result that reached _minGoodTrust
     private float _depthPrior;
     private bool _hasDepthPrior;
     private float _lastDepthTime;
@@ -160,31 +164,31 @@ public sealed class ImageHandSolver : MonoBehaviour
     private float _weight;
     private int _seenSwitches;
     private float _slowUntil;
-    private bool _thumbFrozen, _indexFrozen; // ngon ra khoi khung -> giu dang cu
+    private bool _thumbFrozen, _indexFrozen; // finger out of frame -> keep its previous pose
     private float _forceGate = 1f;
 
-    // Ket qua da loc One-Euro (cap nhat moi lan giai xong)
+    // One Euro filtered result (updated after every solve)
     private Vector3 _fP;
     private Quaternion _fR = Quaternion.identity;
     private readonly float[] _fA = new float[8];
     private float _fSpeedP, _fSpeedR;
     private readonly float[] _fSpeedA = new float[8];
-    private Vector3 _fVel, _fAngVel;           // m/s, truc*do/s
+    private Vector3 _fVel, _fAngVel;           // m/s, axis*degrees/s
     private readonly float[] _fVelA = new float[8];
-    private float _fTime = -999f;              // lan loc gan nhat (moc ngoai suy hien thi)
-    private float _fTimeW, _fTimeT, _fTimeI;    // lan cuoi NHAN ket qua co tay / ngon cai / ngon tro (che do moi)
-    private Quaternion _rawPrevR = Quaternion.identity; // ket qua tho lan truoc (de xac nhan cu nhay)
+    private float _fTime = -999f;              // latest filter step (reference for display extrapolation)
+    private float _fTimeW, _fTimeT, _fTimeI;    // latest ACCEPTED wrist / thumb / index result (new mode)
+    private Quaternion _rawPrevR = Quaternion.identity; // previous raw result (to confirm jumps)
     private float _rawPrevTime = -999f;
-    // Tang truot giua (hien thi = 2 tang noi tiep)
+    // Middle smoothing stage (display = 2 chained stages)
     private Vector3 _midP;
     private Quaternion _midR = Quaternion.identity;
     private readonly float[] _midA = new float[8];
     private bool _hasFilter;
-    // Tam tay theo Quest + camera LUC CHUP anh vua giai (bu do tre bang chuyen dong Quest)
+    // Quest hand centre + camera AT CAPTURE TIME of the solved image (latency compensation from Quest motion)
     private Vector3 _solveHintCenter, _solveCamPos;
     private bool _hasSolveHint;
 
-    // --- Chan doan (FingerUDPReceiver ghi vao glove_diag) ---
+    // --- Diagnostics (written to glove_diag by FingerUDPReceiver) ---
     public float Weight => _weight;
     public int SolvedFrameId { get; private set; }
     public float ImageError => _fit != null ? _fit.ImageError : 0f;
@@ -194,32 +198,32 @@ public sealed class ImageHandSolver : MonoBehaviour
     public float Pinch => _fit != null ? _fit.Pinch : 0f;
     public int Switches => _fit != null ? _fit.Switches : 0;
     public float SolveMs { get; private set; }
-    /// <summary>Muc tin cua lan giai gan nhat (0..1) cho vi tri/huong co tay.</summary>
+    /// <summary>Trust of the latest solve (0..1) for the wrist position / rotation.</summary>
     public float LastTrust { get; private set; } = 1f;
     public bool Ready => _fit != null;
     public int DorsalUsed => _fit != null ? _fit.DorsalUsed : -1;
-    /// <summary>Kich thuoc tay gang ao hien tai (1 = khung xuong chuan, long ban tay ~9.9 cm).</summary>
+    /// <summary>Current glove hand size (1 = the reference skeleton, palm about 9.9 cm).</summary>
     public float HandScale => _wrist != null ? _wrist.lossyScale.x : 0f;
-    /// <summary>Tuoi anh vua giai (ms): tu luc chup toi luc ket qua Python ve Unity.</summary>
+    /// <summary>Age of the solved image (ms): from capture until Python's result reached Unity.</summary>
     public float FrameAgeMs { get; private set; }
-    /// <summary>Nhu FrameAgeMs nhung tinh tu luc camera PHOI SANG (som hon ca phan camera xu ly). 0 = khong doc duoc.</summary>
+    /// <summary>Like FrameAgeMs but from the camera EXPOSURE (earlier still, includes camera processing). 0 = unknown.</summary>
     public float ExposureAgeMs { get; private set; }
-    /// <summary>Co tay giai THO tu anh gan nhat (chua loc, chua ngoai suy) va luc camera phoi sang anh do
-    /// (Time.realtimeSinceStartup, 0 = khong biet) -- "tay that luc chup", de do tre tay ao so voi tay that.</summary>
+    /// <summary>RAW wrist solved from the latest image (not filtered, not extrapolated) and that image's exposure time
+    /// (Time.realtimeSinceStartup, 0 = unknown): "the real hand at capture time", to measure virtual vs real hand latency.</summary>
     public Vector3 RawWrist { get; private set; }
     public float RawExposureTime { get; private set; }
-    /// <summary>Co tay dang hien lech ket qua giai moi nhat bao nhieu (mm / do) -- phan tre do bo loc.</summary>
+    /// <summary>How far the shown wrist is from the latest solve (mm / degrees): the lag added by the filters.</summary>
     public float LagMm { get; private set; }
     public float LagDeg { get; private set; }
-    /// <summary>Muc tin lan giai gan nhat: co tay, ngon cai, ngon tro (0..1, truoc khi ap nguong nhan/bo).</summary>
+    /// <summary>Trust of the latest solve: wrist, thumb, index (0..1, before the accept / reject thresholds).</summary>
     public float WristTrust { get; private set; }
     public float ThumbTrust { get; private set; }
     public float IndexTrust { get; private set; }
-    /// <summary>So diem (tren 9) sat mep / ngoai anh o anh vua nhan.</summary>
+    /// <summary>Number of points (of 9) near / outside the image edge in the latest image.</summary>
     public int EdgePoints { get; private set; }
-    /// <summary>0 = tay day du trong khung, 1 = mot phan ra ngoai (co diem bi bo / ngon dang giu dang), 2 = khong thay tay (giu dang / ve Quest).</summary>
+    /// <summary>0 = hand fully in frame, 1 = partly out (points dropped / a finger frozen), 2 = hand not seen (pose held / back to Quest).</summary>
     public int State { get; private set; } = 2;
-    /// <summary>Gate luc cho GloveForceEsp32Output: = Weight, ve 0 khi ngon cai/tro dang giu dang (_cutForceWhenFingerFrozen).</summary>
+    /// <summary>Force gate for GloveForceEsp32Output: = Weight, goes to 0 while the thumb or index pose is held (_cutForceWhenFingerFrozen).</summary>
     public float ForceWeight => _weight * _forceGate;
     public bool ThumbFrozen => _thumbFrozen;
     public bool IndexFrozen => _indexFrozen;
@@ -228,8 +232,8 @@ public sealed class ImageHandSolver : MonoBehaviour
     private Oculus.Interaction.HandVisual _gloveVisual, _leftVisual;
     private float _leftScale;
 
-    /// <summary>Goi tu FingerUDPReceiver ngay sau khi tao dong hoc 5 ngon (rig o tu the nghi).</summary>
-    /// <param name="fitters">5 ngon: cai, tro (dung tay), giua/ap ut/ut (tinh vi tri cum luc giac khi nam).</param>
+    /// <summary>Called by FingerUDPReceiver right after creating the five finger kinematics (rig in its rest pose).</summary>
+    /// <param name="fitters">5 fingers: thumb, index (built), middle / ring / little (used to place the hexagon plate when curled).</param>
     public void Initialize(FingerUDPReceiver receiver, Transform wrist, FingerChainFitter[] fitters, Vector3 palmTarget, Vector3 closedAngles)
     {
         _receiver = receiver;
@@ -251,8 +255,8 @@ public sealed class ImageHandSolver : MonoBehaviour
         for (int i = 0; i < _between.Length; i++) _betweenRest[i] = _between[i].localRotation;
     }
 
-    /// <summary>Dung tay ao cho khung nay. questUpdated = HandVisual vua ghi co tay moi (questPos/Rot).
-    /// holdLonger = dang cam vat ma mat du lieu -> giu tu the cuoi them (khong de vat tuot).</summary>
+    /// <summary>Builds the virtual hand for this frame. questUpdated = HandVisual has just written a new wrist (questPos/Rot).
+    /// holdLonger = holding an object while data is lost -> keep the last pose longer (so the object is not dropped).</summary>
     public void Drive(bool questUpdated, Vector3 questPos, Quaternion questRot, bool dataValid, bool holdLonger = false)
     {
         if (_fit == null) return;
@@ -266,7 +270,7 @@ public sealed class ImageHandSolver : MonoBehaviour
             bool fresh = _fit.HasSolution && (Time.time - _lastGoodTime <= _holdSeconds || holdLonger);
             _weight = Mathf.MoveTowards(_weight, fresh ? 1f : 0f, Time.deltaTime / Mathf.Max(_blendSeconds, 1e-3f));
             bool frozen = _thumbFrozen || _indexFrozen;
-            _forceGate = _cutForceWhenFingerFrozen && frozen ? 0f : 1f; // GloveForceEsp32Output tu lam muot gate
+            _forceGate = _cutForceWhenFingerFrozen && frozen ? 0f : 1f; // GloveForceEsp32Output smooths the gate itself
             State = !fresh ? 2 : (EdgePoints > 0 || frozen ? 1 : 0);
             if (_fit.HasSolution)
             {
@@ -281,7 +285,7 @@ public sealed class ImageHandSolver : MonoBehaviour
                 }
                 else
                 {
-                    // Bo giai vua doi sang cach hieu khac (dang tay khac han): truot cham hon mot chut
+                    // The solver just switched interpretation (a clearly different hand pose): glide a bit slower
                     if (_fit.Switches != _seenSwitches)
                     {
                         _seenSwitches = _fit.Switches;
@@ -289,13 +293,13 @@ public sealed class ImageHandSolver : MonoBehaviour
                     }
                     float tau = Time.time < _slowUntil ? _switchSeconds * 0.25f : _displaySeconds;
                     float a = 1f - Mathf.Exp(-Time.deltaTime / Mathf.Max(tau, 1e-3f));
-                    // Dich = ket qua da loc, day tiep theo van toc ke tu lan giai cuoi
+                    // Target = the filtered result, pushed on along the velocity since the last solve
                     float ahead = Mathf.Clamp(Time.time - _fTime, 0f, _maxExtrapolateSeconds);
                     float aheadR = _extrapolateRotation * ahead;
                     Vector3 tgtP = _fP + _extrapolate * ahead * _fVel;
                     if (_useQuestMotion && TryQuestMotion(out Vector3 questDelta)) tgtP = _fP + questDelta;
                     Quaternion tgtR = Quaternion.AngleAxis(_fAngVel.magnitude * aheadR, _fAngVel.normalized) * _fR;
-                    // 2 tang truot noi tiep: van toc hien thi lien tuc (khong giat theo nhip anh)
+                    // Two chained smoothing stages: continuous display velocity (no stepping at the image rate)
                     _midP = Vector3.Lerp(_midP, tgtP, a);
                     _dispP = Vector3.Lerp(_dispP, _midP, a);
                     _midR = Quaternion.Slerp(_midR, tgtR, a);
@@ -311,8 +315,8 @@ public sealed class ImageHandSolver : MonoBehaviour
             }
         }
 
-        // Ghi vao xuong (moi lan goi -- HandVisual co the vua ghi de). Co tay: tron tay anh <-> tay Quest theo _weight.
-        // Ngon: _keepFingersWhenLost -> luon dang tu anh (dang tot cuoi khi mat tay), vi Quest khong nhin duoc ngon deo gang.
+        // Write to the bones (on every call -- HandVisual may have just overwritten them). Wrist: blend image hand <-> Quest hand by _weight.
+        // Fingers: with _keepFingersWhenLost always the image pose (the last good pose when the hand is lost), since the Quest cannot see gloved fingers.
         float w = _hasDisp ? _weight : 0f;
         float wf = _keepFingersWhenLost ? (_hasDisp ? 1f : 0f) : w;
         if (wf > 0f)
@@ -326,7 +330,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         _index.Apply(wf);
     }
 
-    /// <summary>Doan tay Quest da di ke tu luc chup anh vua giai (tam tay = goc ngon giua, cung diem lam goi y).</summary>
+    /// <summary>How far the Quest hand has moved since the solved image was captured (hand centre = middle finger base, the same point as the hint).</summary>
     private bool TryQuestMotion(out Vector3 delta)
     {
         delta = Vector3.zero;
@@ -341,8 +345,8 @@ public sealed class ImageHandSolver : MonoBehaviour
         return true;
     }
 
-    /// <summary>Kich thuoc tay gang ao lay tu tay trai tran, roi bao bo giai kich thuoc hien tai (HandVisual dat lai
-    /// kich thuoc goc ban tay moi khung; ham nay chay SAU HandVisual nen ghi de duoc).</summary>
+    /// <summary>Glove hand size from the bare left hand, then tells the solver the current size (HandVisual resets the
+    /// hand root scale every frame; this runs AFTER HandVisual, so it can overwrite it).</summary>
     private void ApplyHandScale()
     {
         if (_useLeftHandScale && _gloveVisual != null && _gloveVisual.Root != null)
@@ -390,7 +394,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         if (_streamer == null || !_streamer.TryGetFramePose(fid, out Pose cam)) return;
         if (_streamer.TryGetFrameAge(fid, out float age)) FrameAgeMs = age * 1000f;
 
-        // Diem sat mep / ngoai anh: model doan chu khong nhin thay -> trong so 0, tinh nhu do tin cay 0
+        // Points near / outside the image edge: the model guesses instead of seeing -> weight 0, treated as confidence 0
         int inFrame = 0, palmIn = 0, thumbIn = 0, indexIn = 0, edge = 0;
         for (int i = 0; i < HandImageFit.Points; i++)
         {
@@ -412,14 +416,14 @@ public sealed class ImageHandSolver : MonoBehaviour
         EdgePoints = edge;
         if (_rejectEdgePoints && (inFrame < _minInFramePoints || palmIn == 0))
         {
-            // Qua it diem nhin thay that -> khong giai (giai ra dang tay meo); khong lam moi "lan cuoi thay tay"
+            // Too few really visible points -> no solve (it would give a twisted hand); does not refresh "hand last seen"
             WristTrust = ThumbTrust = IndexTrust = 0f;
             return;
         }
         _thumbFrozen = _rejectEdgePoints && thumbIn < _minFingerPoints;
         _indexFrozen = _rejectEdgePoints && indexIn < _minFingerPoints;
 
-        // Chieu sau tay theo Quest LUC CHUP (tam tay = goc ngon giua), trung binh theo thoi gian
+        // Hand depth from the Quest AT CAPTURE TIME (hand centre = middle finger base), averaged over time
         _hasSolveHint = false;
         if (_streamer.TryGetFrameHint(fid, out Vector3 center, out _))
         {
@@ -437,7 +441,7 @@ public sealed class ImageHandSolver : MonoBehaviour
             }
         }
 
-        // Cum luc giac tren mu ban tay: 1 = thay (tia qua tam cum), 0 = tim ma khong thay, -1 = khong biet
+        // Hexagon plate on the back of the hand: 1 = seen (ray through its centre), 0 = searched but not seen, -1 = unknown
         Vector3 dorsalDir = Vector3.zero;
         if (!_useDorsalTiles) dorsal = -1;
         else if (dorsal == 1)
@@ -446,7 +450,7 @@ public sealed class ImageHandSolver : MonoBehaviour
             else dorsal = -1;
         }
 
-        // Giai tiep tu dap an truoc chi khi dap an do con TOT (ket qua kem lam diem xuat phat de bi ket o dang sai)
+        // Start from the previous answer only while it is still GOOD (a bad starting point easily gets stuck in a wrong pose)
         bool warm = Time.time - _lastGoodTime <= _warmSeconds;
         var sw = System.Diagnostics.Stopwatch.StartNew();
         bool ok = _fit.Solve(cam.position, cam.rotation, _dirs, _w,
@@ -454,7 +458,7 @@ public sealed class ImageHandSolver : MonoBehaviour
                              warm, dorsal, dorsalDir);
         SolveMs = (float)sw.Elapsed.TotalMilliseconds;
         if (!ok) return;
-        // Moc "tay that luc chup": ket qua tho + luc phoi sang (ghi ca khi bo loc bo ket qua nay)
+        // "Real hand at capture time" stamp: raw result + exposure time (recorded even if the filter drops this result)
         RawWrist = _fit.Position;
         if (_streamer.TryGetFrameExposureTime(fid, out float exposure))
         {
@@ -464,7 +468,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         else RawExposureTime = ExposureAgeMs = 0f;
         if (!_hasFilter || Time.time - _lastGoodTime > _holdSeconds)
         {
-            // Bat dau lai (lan dau / sau khi mat tay): chi lay ket qua TOT, khong thi tay giu nguyen dang dang hien
+            // Restart (first time / after losing the hand): only take a GOOD result, otherwise the hand keeps its current pose
             LastTrust = ResultTrust();
             WristTrust = LastTrust;
             if (LastTrust < _minGoodTrust) return;
@@ -476,10 +480,10 @@ public sealed class ImageHandSolver : MonoBehaviour
         SolvedFrameId = fid;
     }
 
-    /// <summary>Muc tin theo sai so anh (1 = tot, 0 = qua kem).</summary>
+    /// <summary>Trust from the image error (1 = good, 0 = too bad).</summary>
     private float ErrTrust() => Mathf.Clamp01((_errBad - _fit.ImageError) / Mathf.Max(_errBad - _errGood, 1e-4f));
 
-    /// <summary>Do tin ket qua vua giai theo sai so anh + do tin cay diem (nhu FilterStep, khong co phan chong nhay huong).</summary>
+    /// <summary>Trust of the result just solved, from the image error + point confidence (like FilterStep, without the rotation-jump rule).</summary>
     private float ResultTrust()
     {
         float w = ErrTrust();
@@ -487,9 +491,9 @@ public sealed class ImageHandSolver : MonoBehaviour
         return Mathf.Max(w * Mathf.Max(ConfTrust(0, 8), 0.3f), _minTrust);
     }
 
-    /// <summary>Bat dau lai bo loc tu ket qua giai hien tai (lan dau, hoac sau khi mat tay lau).</summary>
-    /// <param name="keepUnsureFingers">Mat tay lau roi thay lai: ngon nao model khong chac thi GIU dang cu (tron theo do tin cay)
-    /// thay vi lay thang ket qua -- luc 2 ngon sap cham ket qua ve thua (cach nhau > 1 s), lay thang thi ngon cai nhay 20-80 do.</param>
+    /// <summary>Restarts the filter from the current solve (first time, or after losing the hand for long).</summary>
+    /// <param name="keepUnsureFingers">Hand lost for long and seen again: fingers the model is unsure about KEEP their previous pose (blended by
+    /// confidence) instead of jumping to the result -- with the fingertips about to touch, results come rarely (more than 1 s apart) and the thumb jumped 20-80 degrees.</param>
     private void ResetFilter(float now, bool keepUnsureFingers = false)
     {
         _fP = _fit.Position;
@@ -510,9 +514,9 @@ public sealed class ImageHandSolver : MonoBehaviour
         _hasFilter = true;
     }
 
-    /// <summary>Loc One-Euro 1 buoc cho lan giai moi: tan so cat = _minCutoff + beta * toc do (da lam muot),
-    /// nen tay dung yen thi loc manh (it rung), tay chay thi gan nhu theo ngay (it tre).
-    /// Che do CU: toc do bam nhan voi muc tin (xem _trustRejectsNotSlows).</summary>
+    /// <summary>One One Euro filter step for a new solve: cutoff = _minCutoff + beta * (smoothed) speed,
+    /// so a still hand is smoothed strongly (little jitter) and a moving hand is followed almost at once (little lag).
+    /// OLD mode: the follow speed is multiplied by the trust (see _trustRejectsNotSlows).</summary>
     private void FilterStep(float now)
     {
         float te = Mathf.Max(now - _fTime, 1e-3f);
@@ -520,7 +524,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         Vector3 p = _fit.Position;
         Quaternion r = _fit.Rotation;
 
-        // Do tin cay ket qua nay: sai so anh, nhay huong dot ngot khong duoc xac nhan, do tin cay diem cua model.
+        // Trust of this result: image error, unconfirmed sudden rotation jump, model point confidence.
         float w = ErrTrust();
         bool confirmed = Quaternion.Angle(r, _rawPrevR) < _confirmDegrees && now - _rawPrevTime < 0.2f;
         if (Quaternion.Angle(r, _fR) > _jumpDegrees && !confirmed) w *= 0.2f;
@@ -546,7 +550,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         for (int k = 0; k < 8; k++)
         {
             float x = _fit.Angles[k], wk = k < 4 ? wT : wI;
-            if (wk <= 0f) { _fVelA[k] = 0f; continue; } // ngon dang giu dang
+            if (wk <= 0f) { _fVelA[k] = 0f; continue; } // finger pose is being held
             _fSpeedA[k] = Mathf.Lerp(_fSpeedA[k], Mathf.Abs(x - _fA[k]) / te, ad * wk);
             float newA = Mathf.Lerp(_fA[k], x, OneEuroAlpha(te, _minCutoff + _betaAngle * _fSpeedA[k]) * wk);
             _fVelA[k] = Mathf.Lerp(_fVelA[k], (newA - _fA[k]) / te, 0.5f * wk);
@@ -555,10 +559,10 @@ public sealed class ImageHandSolver : MonoBehaviour
         _fTime = _fTimeW = _fTimeT = _fTimeI = now;
     }
 
-    /// <summary>Loc One-Euro, che do MOI: muc tin chi dung de NHAN / BO ket qua. Co tay, ngon cai, ngon tro xet rieng:
-    /// tin duoi _rejectBelow (hoac co tay nhay huong khong duoc xac nhan, ngon dang giu dang) -> giu nguyen, van toc 0;
-    /// duoc nhan -> bam voi toc do One-Euro nhan max(muc tin, _acceptFloor). Thoi gian te tinh tu lan NHAN gan nhat
-    /// cua tung phan, nen sau vai ket qua bi bo, ket qua tot dau tien keo tay ve dung cho ngay.</summary>
+    /// <summary>One Euro filter, NEW mode: trust is only used to ACCEPT / REJECT a result. Wrist, thumb and index are judged separately:
+    /// trust below _rejectBelow (or an unconfirmed wrist rotation jump, or a frozen finger) -> unchanged, velocity 0;
+    /// accepted -> followed at the One Euro rate times max(trust, _acceptFloor). The time step te counts from that part's latest
+    /// ACCEPTED result, so after a few rejected results the first good one pulls the hand to the right place at once.</summary>
     private void FilterStepGated(float now)
     {
         Vector3 p = _fit.Position;
@@ -572,7 +576,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         float wristTrust = err * Mathf.Max(PalmConfTrust(), 0.3f);
         float tT = _thumbFrozen ? 0f : err * ConfTrust(1, 4);
         float tI = _indexFrozen ? 0f : err * ConfTrust(5, 8);
-        LastTrust = WristTrust = wristTrust; // "thay tay" xet truoc luat nhay huong (nhu che do cu)
+        LastTrust = WristTrust = wristTrust; // "hand seen" is judged before the rotation-jump rule (as in the old mode)
         ThumbTrust = tT;
         IndexTrust = tI;
 
@@ -591,14 +595,14 @@ public sealed class ImageHandSolver : MonoBehaviour
             _fR = newR;
             _fTimeW = now;
         }
-        else _fVel = _fAngVel = Vector3.zero; // khong ngoai suy theo van toc cu khi dang bo ket qua
+        else _fVel = _fAngVel = Vector3.zero; // do not extrapolate along an old velocity while results are being dropped
 
         FilterFingerGated(0, Accept(tT), ref _fTimeT, now);
         FilterFingerGated(4, Accept(tI), ref _fTimeI, now);
         _fTime = now;
     }
 
-    /// <summary>4 goc 1 ngon (bat dau tu first) theo luat nhan / bo cua FilterStepGated.</summary>
+    /// <summary>The 4 angles of one finger (starting at first) under FilterStepGated's accept / reject rule.</summary>
     private void FilterFingerGated(int first, float accept, ref float lastTime, float now)
     {
         if (accept <= 0f)
@@ -619,7 +623,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         lastTime = now;
     }
 
-    /// <summary>Muc tin -> he so bam: duoi _rejectBelow = 0 (bo), con lai it nhat _acceptFloor.</summary>
+    /// <summary>Trust -> follow factor: below _rejectBelow = 0 (dropped), otherwise at least _acceptFloor.</summary>
     private float Accept(float trust) => trust >= _rejectBelow ? Mathf.Max(trust, _acceptFloor) : 0f;
 
     private static Vector3 AngularVelocity(Quaternion from, Quaternion to, float te)
@@ -629,8 +633,8 @@ public sealed class ImageHandSolver : MonoBehaviour
         return float.IsFinite(axis.x) ? axis * (dAng / te) : Vector3.zero;
     }
 
-    /// <summary>Do tin cay (0..1) theo trung binh do tin cay cac diem anh [from..to] cua ket qua vua giai (model Python).
-    /// Diem sat mep / ngoai anh tinh la 0 (_rejectEdgePoints).</summary>
+    /// <summary>Trust (0..1) from the mean confidence of image points [from..to] of the latest solve (Python model).
+    /// Points near / outside the image edge count as 0 (_rejectEdgePoints).</summary>
     private float ConfTrust(int from, int to)
     {
         float sum = 0f;
@@ -638,7 +642,7 @@ public sealed class ImageHandSolver : MonoBehaviour
         return ConfToTrust(sum / (to - from + 1));
     }
 
-    /// <summary>Do tin cay 3 diem long ban tay (co tay, goc ngon cai, goc ngon tro) -- quyet dinh co tay.</summary>
+    /// <summary>Confidence of the 3 palm points (wrist, thumb base, index base), which decide the wrist.</summary>
     private float PalmConfTrust()
     {
         float sum = 0f;
