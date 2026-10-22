@@ -1,188 +1,180 @@
 using UnityEngine;
 
 /// <summary>
-/// Vat the "bop duoc": khi dau ngon cai + dau ngon tro ao an vao be mat,
-/// cac dinh (vertex) gan dau ngon bi day vao trong -> tao vet lun; bop du
-/// chat tu 2 phia doi dien thi vat DINH vao tay (di theo diem giua 2 dau
-/// ngon), tha ra thi vat nay ve hinh cu nhu lo xo.
+/// A "squeezable" object: when the virtual thumb and index tips press into its surface, the vertices near the fingertips are
+/// pushed in -> a dent; squeezed hard enough from two opposite sides, the object ATTACHES to the hand (follows the midpoint
+/// of the two fingertips); when released it springs back to its original shape.
 ///
-/// Gan vao bat ky object nao co MeshFilter (qua cau, khoi, do choi...).
-/// Mesh can du nhieu dinh -- qua cau mac dinh cua Unity (515 dinh) la du,
-/// khoi lap phuong mac dinh (24 dinh) se lun rat tho.
+/// Works on any object with a MeshFilter (sphere, box, toy...). The mesh needs enough vertices -- Unity's default sphere
+/// (515 vertices) is fine, the default cube (24 vertices) dents very coarsely.
 ///
-/// Nhieu ban tay cung tuong tac duoc voi 1 vat (danh sach _hands): tay nao
-/// cung an lun duoc; tay nao kep dung cach thi cam (moi luc chi 1 tay cam,
-/// tay kia van an lun duoc; tay dang cam tha ra thi tay kia co the do lay).
+/// Several hands can interact with one object (_hands list): any hand can dent it; a hand that pinches correctly holds it
+/// (only one hand holds at a time, the other can still dent it; when the holding hand lets go the other can catch it).
 ///
-/// Gia dinh scale DEU 3 truc (x = y = z) de doi don vi local <-> met.
+/// Assumes a UNIFORM scale on all three axes (x = y = z) to convert local units <-> metres.
 ///
-/// Khong can FingerUDPReceiver gui them gi: script chi doc vi tri 2 dau ngon
-/// ao SAU KHI FingerUDPReceiver da xoay xuong xong trong khung hinh nay
-/// (DefaultExecutionOrder lon hon -> chay sau LateUpdate cua receiver).
+/// Nothing extra is needed from FingerUDPReceiver: this script only reads the two virtual fingertips AFTER FingerUDPReceiver has
+/// posed the bones this frame (higher DefaultExecutionOrder -> runs after the receiver's LateUpdate).
 /// </summary>
 [DefaultExecutionOrder(100)]
 [RequireComponent(typeof(MeshFilter))]
 public class SquishyPinchable : MonoBehaviour
 {
-    /// <summary>1 ban tay: dau ngon cai + dau ngon tro.</summary>
+    /// <summary>One hand: thumb tip + index tip.</summary>
     [System.Serializable]
     public struct Hand
     {
-        [Tooltip("Tay tran: LeftThumbTip (do IsdkFingertipProxy cap nhat). Tay gang: XRHand_ThumbTip.")]
+        [Tooltip("Bare hand: LeftThumbTip (updated by IsdkFingertipProxy). Glove hand: XRHand_ThumbTip.")]
         public Transform thumbTip;
         public Transform indexTip;
-        [Tooltip("Tuy chon: co tay cua ban tay nay. Khi dang cam, vat di theo CO TAY (Quest bam 72 lan/giay, rat muot) thay vi theo " +
-                 "diem giua 2 dau ngon (tay gang: chi ~8 lan/giay tu camera, nhay vai mm moi lan). De trong = theo 2 dau ngon nhu cu.")]
+        [Tooltip("Optional: this hand's wrist. While held, the object follows the WRIST (tracked by the Quest 72 times/s, very smooth) instead of " +
+                 "the midpoint of the two fingertips (glove hand: only ~8 updates/s from the camera, jumping a few mm each time). Empty = follow the fingertips.")]
         public Transform wrist;
     }
 
-    [Header("Các bàn tay tương tác được")]
-    [Tooltip("Moi tay trong danh sach deu an lun va cam duoc vat. De trong = tu tim XRHand_ThumbTip / XRHand_IndexTip trong ban tay co FingerUDPReceiver.")]
+    [Header("Hands that can interact")]
+    [Tooltip("Every hand in the list can dent and hold the object. Empty = find XRHand_ThumbTip / XRHand_IndexTip in the hand with FingerUDPReceiver.")]
     [SerializeField] private Hand[] _hands;
 
-    // Cach cu (moi vat chi 1 tay) -- giu lai de doc scene cu, tu chuyen sang _hands.
+    // Old layout (one hand per object) -- kept to read old scenes, migrated to _hands automatically.
     [SerializeField, HideInInspector] private Transform _thumbTip;
     [SerializeField, HideInInspector] private Transform _indexTip;
 
-    [Header("Tay gắn theo đầu (tay găng) -- đo theo góc nhìn")]
-    [Tooltip("Chi ap dung cho tay GAN THEO DAU (con cua _viewReference, vd tay gang StaticHandModel_Right). " +
-             "Tay tran do Quest theo doi co vi tri 3D that nen luon do bang khoang cach 3D, khong bi anh huong.\n\n" +
-             "BAT (nen dung): bo qua chieu sau khi do dau ngon co cham vat khong -- keo 2 dau ngon ve CUNG DO SAU voi vat roi moi tinh.\n\n" +
-             "Ly do: du lieu tu camera chi co 2D, va khi tat Preserve Rest Depth moi ngon ao nam phang o do sau cua goc ngon do -- goc ngon cai " +
-             "gan mat hon goc ngon tro ~5 cm. Nhin tu mat thi 2 dau ngon cham nhau, nhung trong 3D chung van lech nhau ~5 cm theo chieu sau, " +
-             "nen neu do khoang cach 3D thi vat khong bao gio thay minh bi kep.\n\n" +
-             "TAT tu 02/10: ImageHandSolver da dung tay gang 3D (co do sau) -- bat thi bong bo qua do sau, " +
-             "tay gan hay xa mat deu cham duoc; khoi cube (PhysicsPinchGrabbable) von do 3D.")]
+    [Header("Head-attached hand (glove hand) -- measured in the view plane")]
+    [Tooltip("Only applies to a HEAD-ATTACHED hand (child of _viewReference, e.g. the glove hand StaticHandModel_Right). " +
+             "A bare hand tracked by the Quest has a real 3D position and is always measured in 3D, unaffected.\n\n" +
+             "ON: ignore depth when testing whether a fingertip touches the object -- pull both fingertips to the object's DEPTH first.\n\n" +
+             "Reason: camera data is 2D only, and with Preserve Rest Depth off each virtual finger lies flat at its base's depth -- the thumb base " +
+             "is ~5 cm closer to the eyes than the index base. Seen from the eyes the two tips touch, but in 3D they are still ~5 cm apart in depth, " +
+             "so with 3D distances the object never sees itself pinched.\n\n" +
+             "OFF now: ImageHandSolver builds a 3D glove hand (with depth) -- with this on the ball would ignore depth and be touchable " +
+             "with the hand near or far; the cube (PhysicsPinchGrabbable) always measures in 3D.")]
     [SerializeField] private bool _measureInViewPlane = false;
-    [Tooltip("Transform dai dien cho mat nguoi xem. De trong = parent cua ban tay (CenterEyeAnchor).")]
+    [Tooltip("Transform standing for the viewer's eyes. Empty = the hand's parent (CenterEyeAnchor).")]
     [SerializeField] private Transform _viewReference;
 
-    [Header("Độ lún")]
-    [Tooltip("Ban kinh dau ngon (met). Diem 'dau ngon' cua mo hinh tay nam o TRONG ngon, da ngon nam cach no khoang nay -- " +
-             "vat bat dau lun khi DA ngon cham be mat, va FingertipSurfaceConstraint giu da ngon nam dung tren be mat.")]
+    [Header("Compression")]
+    [Tooltip("Fingertip radius (m). The hand model's 'fingertip' point is INSIDE the finger, the skin is this far from it -- " +
+             "the object starts to dent when the SKIN touches the surface, and FingertipSurfaceConstraint keeps the skin exactly on the surface.")]
     [SerializeField] private float _fingerRadius = 0.008f;
-    [Tooltip("Do lun TOI DA, tinh theo phan cua ban kinh vat (0.25 = lun toi da 1/4 ban kinh). Nho = vat cung, lon = vat mem.")]
+    [Tooltip("MAXIMUM compression, as a fraction of the object's radius (0.25 = at most 1/4 of the radius). Small = stiff, large = soft.")]
     [Range(0.02f, 0.6f)]
     [SerializeField] private float _maxIndent = 0.25f;
-    [Tooltip("Do rong cua vet lun, theo phan cua ban kinh. Nho = vet lun nhon nhu an bang dau but, lon = vet lun rong va tron.")]
+    [Tooltip("Width of the dent, as a fraction of the radius. Small = a sharp dent like a pen tip, large = a wide round dent.")]
     [Range(0.1f, 1.5f)]
     [SerializeField] private float _contactSpread = 0.45f;
-    [Tooltip("Vat phinh ra 2 ben khi bi bop (nhu bong that giu the tich). 0 = khong phinh.")]
+    [Tooltip("The object bulges at the sides when squeezed (like a real ball keeping its volume). 0 = no bulge.")]
     [Range(0f, 1f)]
     [SerializeField] private float _bulge = 0.35f;
-    [Tooltip("Do cung cua lo xo: vet lun bam theo dau ngon nhanh co nao, va nay ve nhanh co nao khi tha.")]
+    [Tooltip("Spring stiffness: how quickly the dent follows the fingertip, and how quickly it springs back when released.")]
     [SerializeField] private float _stiffness = 300f;
-    [Tooltip("Giam chan lo xo. Thap = nay rung rinh vai lan truoc khi dung, cao = ve tu tu khong rung.")]
+    [Tooltip("Spring damping. Low = wobbles a few times before settling, high = returns slowly without wobbling.")]
     [SerializeField] private float _damping = 18f;
 
-    [Header("Bóp bằng 2 ngón (đang cầm)")]
-    [Tooltip("Dang cam bang 2 ngon: 2 vet lun DOI XUNG qua tam bong (2 luc doi nhau), CUNG do sau, nam tren 1 TRUC KEP on dinh " +
-             "(he toa do bong, xoay cham theo tay) -- ngon cai + tro ao dat dung vao 2 vet lun (FingertipSurfaceConstraint). " +
-             "Tat = cach cu: moi vet lun chay theo huong dau ngon that dang rung -> bong va ngon nhay lung tung khi nhac len.")]
+    [Header("Two-finger squeeze (while held)")]
+    [Tooltip("Held with two fingers: two dents SYMMETRIC about the ball centre (two opposing forces), the SAME depth, on one stable PINCH AXIS " +
+             "(in the ball's frame, slowly following the hand) -- the virtual thumb + index sit exactly in the two dents (FingertipSurfaceConstraint). " +
+             "Off = old behaviour: each dent follows the jittery real fingertip direction -> ball and fingers jumped around when lifted.")]
     [SerializeField] private bool _symmetricPinch = true;
-    [Tooltip("Truc kep xoay theo huong ngon cai -> ngon tro THAT cham co nao (giay). Lon = on dinh hon, nho = theo tay nhanh hon.")]
+    [Tooltip("How slowly the pinch axis follows the REAL thumb -> index direction (s). Large = more stable, small = follows the hand faster.")]
     [SerializeField] private float _pinchAxisSeconds = 0.3f;
-    [Tooltip("Do sau 2 vet lun bam theo luc bop (khe 2 dau ngon that) cham co nao (giay) -- loc rung cua tay gang.")]
+    [Tooltip("How slowly the depth of the two dents follows the squeeze (gap between the real fingertips) (s), to filter glove-hand jitter.")]
     [SerializeField] private float _pinchDepthSeconds = 0.08f;
 
-    [Header("Dính vào tay")]
-    [Tooltip("Bat dau cam khi CA HAI dau ngon cach be mat vat khong qua khoang nay (met) va nam o 2 phia doi dien nhau. Lon hon = de bat hon, khong can chinh xac.")]
+    [Header("Attaching to the hand")]
+    [Tooltip("Grab starts when BOTH fingertips are within this distance (m) of the surface and on opposite sides. Larger = easier to grab, less precision needed.")]
     [SerializeField] private float _grabMargin = 0.015f;
-    [Tooltip("Tha ra khi 2 dau ngon mo rong hon duong kinh vat them khoang nay (met). Luon ap dung, du chon cach tha nao.")]
+    [Tooltip("Release when the fingertips open wider than the object's diameter plus this (m). Always applies, whichever release rule is chosen.")]
     [SerializeField] private float _releaseMargin = 0.01f;
 
     public enum ReleaseRule
     {
-        WhenFingersOpen,     // tha ngay khi 2 ngon bat dau mo ra (khuyen dung)
-        WhenWiderThanObject, // chi tha khi 2 ngon mo rong hon ca vat (cach cu)
+        WhenFingersOpen,     // release as soon as the fingers start to open (recommended)
+        WhenWiderThanObject, // only release when the fingers open wider than the whole object (old behaviour)
     }
 
-    [Tooltip("WhenFingersOpen: tha khi 2 ngon MO RA them _releaseOpening so voi luc bop CHAT NHAT -- theo Prachyabrued & Borst (IJHCS 2012). " +
-             "Ngon that da lot sau vao trong vat (khong co gi chan), nen neu doi 2 ngon mo rong hon ca vat moi tha thi phai mo tay rat xa, vat 'dinh mai khong roi'.\n\n" +
-             "WhenWiderThanObject: cach cu, giu lai de so sanh.")]
+    [Tooltip("WhenFingersOpen: release when the fingers OPEN by _releaseOpening more than at the TIGHTEST squeeze -- after Prachyabrued & Borst (IJHCS 2012). " +
+             "The real fingers are deep inside the object (nothing stops them), so waiting until they open wider than the object means opening the hand very far; the object 'never lets go'.\n\n" +
+             "WhenWiderThanObject: the old rule, kept for comparison.")]
     [SerializeField] private ReleaseRule _releaseRule = ReleaseRule.WhenFingersOpen;
-    [Tooltip("Voi WhenFingersOpen: 2 ngon mo ra them bao nhieu (met) so voi luc bop chat nhat thi tha. Nho = tha nhay, lon = kho roi hon nhung it bi tha nham khi tay run.")]
+    [Tooltip("With WhenFingersOpen: how far (m) the fingers must open beyond the tightest squeeze to release. Small = releases easily, large = harder to drop but fewer accidental releases from a trembling hand.")]
     [SerializeField] private float _releaseOpening = 0.01f;
-    [Tooltip("Dieu kien tha phai dung LIEN TUC trong khoang nay (giay) moi tha. Chong tha nham khi vi tri ngon rung/nhay 1-2 khung " +
-             "(tay gang chi co ~8 diem moi giay tu camera, moi lan cap nhat ngon nhay vai mm). 0 = tha ngay.")]
+    [Tooltip("The release condition must hold CONTINUOUSLY for this long (s). Avoids accidental releases when the finger position jitters / jumps for 1-2 frames " +
+             "(the glove hand gets only ~8 points per second from the camera, each update jumping a few mm). 0 = release immediately.")]
     [SerializeField] private float _releaseDelay = 0.12f;
-    [Tooltip("Khi dang cam, vat truot ve diem giua 2 dau ngon nhanh co nao.")]
+    [Tooltip("While held, how quickly the object slides to the midpoint of the two fingertips.")]
     [SerializeField] private float _followSpeed = 12f;
-    [Tooltip("Tay co 'wrist': vat gan cung vao co tay tu luc cam (nhu cam vat that), va chi tu tu truot ve giua 2 dau ngon voi toc do nay " +
-             "(1/giay) -- de sua lech dan ma khong rung theo tung lan dau ngon nhay.")]
+    [Tooltip("Hand with a 'wrist': the object is fixed to the wrist from the moment of grabbing (like holding a real object), and only slowly slides back to the middle of the two fingertips at this rate " +
+             "(1/s) -- correcting offsets gradually without shaking with every fingertip jump.")]
     [SerializeField] private float _recenterSpeed = 2f;
-    [Tooltip("Tay dang cam bi MAT DAU (Quest tat tay) trong thoi gian ngan hon muc nay (giay) thi van giu vat -- tay hien lai la cam tiep. " +
-             "Mat lau hon moi tha.")]
+    [Tooltip("If the holding hand is LOST (the Quest drops the hand) for less than this (s), the object stays held -- when the hand reappears it keeps holding. " +
+             "Longer losses release it.")]
     [SerializeField] private float _lostGraceSeconds = 0.35f;
-    [Tooltip("Khi dang cam: dat hinh anh dau ngon cai + tro NAM TREN be mat vat (ke ca khi ngon that dang ho ra ngoai), " +
-             "de nhin nhu dang kep that. FingertipSurfaceConstraint thuc hien.")]
+    [Tooltip("While held: place the virtual thumb + index tips ON the object's surface (even when the real fingers are away from it), " +
+             "so it looks like a real pinch. Done by FingertipSurfaceConstraint.")]
     [SerializeField] private bool _snapHeldFingertips = true;
-    [Tooltip("Dau ngon ho ra ngoai be mat qua khoang nay (met) thi khong keo vao nua.")]
+    [Tooltip("Fingertips further than this (m) from the surface are no longer pulled onto it.")]
     [SerializeField] private float _snapMaxGap = 0.03f;
 
-    [Header("Khi thả ra")]
-    [Tooltip("Vi tri vat quay ve khi khong con bi cam. De trong = vat nam yen o cho vua tha.")]
+    [Header("On release")]
+    [Tooltip("Where the object returns when no longer held. Empty = it stays where it was released.")]
     [SerializeField] private Transform _home;
     [SerializeField] private float _returnSpeed = 6f;
 
-    /// <summary>Tat ca vat bop duoc dang bat trong scene -- de
-    /// FingertipSurfaceConstraint biet can kiem tra nhung vat nao.</summary>
+    /// <summary>All enabled squeezable objects in the scene, so FingertipSurfaceConstraint knows which objects to check.</summary>
     public static readonly System.Collections.Generic.List<SquishyPinchable> Active =
         new System.Collections.Generic.List<SquishyPinchable>();
 
-    /// <summary>Dang bi cam (dinh vao tay) hay khong.</summary>
+    /// <summary>Whether the object is held (attached to a hand).</summary>
     public bool IsHeld => _heldBy >= 0;
 
-    /// <summary>Muc lun hien tai 0..1 (1 = lun toi da). De sau nay gui sang
-    /// gang haptic lam luc phan hoi.</summary>
+    /// <summary>Current compression 0..1 (1 = maximum compression).</summary>
     public float Squish01 { get; private set; }
 
-    /// <summary>Ngon THAT dang an VUOT qua muc lun toi da bao nhieu (met) --
-    /// tuc la phan ngon that da lot vao trong vat ma nguoi dung khong nhin
-    /// thay (ngon ao bi giu tren be mat). 0 = khong vuot.</summary>
+    /// <summary>How far (m) the REAL finger presses BEYOND the maximum compression -- the part of the real finger inside the object
+    /// that the user cannot see (the virtual finger is held on the surface). 0 = not beyond.</summary>
     public float OvershootMeters { get; private set; }
 
     private Mesh _mesh;
     private Vector3[] _baseVertices;
     private Vector3[] _deformed;
-    private Vector3 _center;  // tam vat trong he local
-    private float _radius;    // ban kinh trung binh trong he local
-    private float _maxRadius; // dinh xa tam nhat (he local) -- loai nhanh diem o xa khi kiem tra ngon tay
+    private Vector3 _center;  // object centre in local space
+    private float _radius;    // mean radius in local space
+    private float _maxRadius; // farthest vertex from the centre (local) -- quickly rejects far points when checking fingers
 
-    // Mesh thuong co "duong noi" (seam): cung 1 diem nhung luu thanh nhieu
-    // dinh trung nhau (de dan anh be mat). RecalculateNormals tinh rieng
-    // tung dinh nen khi lun, 2 ben duong noi sang toi khac nhau -> hien ra
-    // vet nut. Luu lai cac nhom dinh trung nhau de lay trung binh normal.
+    // Meshes usually have "seams": one point stored as several identical vertices (for texture mapping). RecalculateNormals works
+    // per vertex, so when the surface dents the two sides of a seam shade differently -> a visible crack. The groups of identical
+    // vertices are stored to average their normals.
     private int[][] _seamGroups;
     private Vector3[] _normals;
 
-    // Moi dau ngon la mot "diem an": huong an, do lun hien tai, van toc lo xo.
-    // Tay h co 2 diem: 2h (ngon cai) va 2h+1 (ngon tro).
+    // Each fingertip is a "press point": press direction, current depth, spring velocity.
+    // Hand h has two points: 2h (thumb) and 2h+1 (index).
     private Vector3[] _pressDir = new Vector3[0];
     private float[] _pressSurface = new float[0];
     private float[] _indent = new float[0];
     private float[] _indentVel = new float[0];
     private bool _meshDirty;
 
-    // Kep doi xung khi dang cam: truc kep ngon cai -> ngon tro (he local), do sau vet lun da loc (he local),
-    // do lech tam bong doc truc kep so voi giua 2 dau ngon that (met, + = ve phia ngon tro; xem SetPinchShift)
+    // Symmetric pinch while held: pinch axis thumb -> index (local), filtered dent depth (local),
+    // offset of the ball centre along the pinch axis from the middle of the real fingertips (m, + = towards the index; see SetPinchShift)
     private Vector3 _pinchAxis = Vector3.right;
     private float _pinchDepth;
     private float _pinchShift;
 
-    private int _heldBy = -1; // tay dang cam (-1 = khong ai cam)
+    private int _heldBy = -1; // hand holding the object (-1 = nobody)
     private Vector3 _grabAxis;
     private Quaternion _grabRotation;
-    private float[] _tightestGap = new float[0]; // moi tay: khoang cach 2 dau ngon nho nhat tu luc bat dau cam
-    private float _releaseTimer;                 // dieu kien tha da dung lien tuc bao lau (giay)
-    private float _lostTimer;                    // tay dang cam da mat dau bao lau (giay)
-    private Vector3 _grabLocalPos;               // vi tri vat trong he toa do co tay (khi tay co wrist)
+    private float[] _tightestGap = new float[0]; // per hand: smallest fingertip gap since the grab started
+    private float _releaseTimer;                 // how long the release condition has held (s)
+    private float _lostTimer;                    // how long the holding hand has been lost (s)
+    private Vector3 _grabLocalPos;               // object position in the wrist frame (when the hand has a wrist)
     private Quaternion _grabLocalRot;
     private bool[] _regrabBlocked = new bool[0];
 
-    // Bo dem dung lai moi khung hinh (tranh tao mang moi)
+    // Buffers reused every frame (no new arrays)
     private Vector3[] _points = new Vector3[0];
-    private Vector3[] _rawPoints = new Vector3[0]; // vi tri 3D that cua dau ngon (khong chieu theo goc nhin)
+    private Vector3[] _rawPoints = new Vector3[0]; // real 3D fingertip positions (not projected into the view plane)
     private bool[] _handValid = new bool[0];
 
     private void Awake()
@@ -194,7 +186,7 @@ public class SquishyPinchable : MonoBehaviour
             Transform index = FindInScene("XRHand_IndexTip");
             if (thumb != null && index != null) _hands = new[] { new Hand { thumbTip = thumb, indexTip = index } };
         }
-        // Tay gang (XRHand_*): co tay la to tien ten "...Wrist" cua dau ngon -- tu dien neu de trong.
+        // Glove hand (XRHand_*): the wrist is the fingertip's "...Wrist" ancestor -- filled in automatically if empty.
         for (int h = 0; h < _hands.Length; h++)
         {
             if (_hands[h].wrist != null || _hands[h].thumbTip == null) continue;
@@ -212,7 +204,7 @@ public class SquishyPinchable : MonoBehaviour
 
     private void OnValidate() => MigrateLegacyHand();
 
-    /// <summary>Scene cu chi co 1 cap _thumbTip/_indexTip -> chuyen thanh tay dau tien.</summary>
+    /// <summary>Old scenes only have one _thumbTip/_indexTip pair -> turned into the first hand.</summary>
     private void MigrateLegacyHand()
     {
         if (_hands == null) _hands = new Hand[0];
@@ -224,7 +216,7 @@ public class SquishyPinchable : MonoBehaviour
         _indexTip = null;
     }
 
-    /// <summary>Cap phat trang thai theo so tay (doi so tay trong Inspector luc chay cung khong sao).</summary>
+    /// <summary>Allocates per-hand state (changing the number of hands in the Inspector at run time is fine).</summary>
     private void EnsureHandState()
     {
         if (_hands == null) _hands = new Hand[0];
@@ -248,16 +240,16 @@ public class SquishyPinchable : MonoBehaviour
     private void OnEnable() => Active.Add(this);
     private void OnDisable() => Active.Remove(this);
 
-    /// <summary>Tach mesh ra ban rieng (de khong lam hong mesh goc dung
-    /// chung voi object khac) va luu lai hinh dang goc.</summary>
+    /// <summary>Makes a private copy of the mesh (so the original mesh shared with other objects is not modified) and stores
+    /// the original shape.</summary>
     public void EnsureInitialized()
     {
-        if (_baseVertices != null && _baseVertices.Length > 0) // Editor bien dich lai: mang null thanh mang rong
+        if (_baseVertices != null && _baseVertices.Length > 0) // after an Editor recompile a null array becomes an empty array
         {
-            // Editor giu _baseVertices qua lan bien dich lai nhung truong moi them thi = 0
+            // The Editor keeps _baseVertices across recompiles but newly added fields are 0
             if (_maxRadius <= 0f)
                 foreach (var v in _baseVertices) _maxRadius = Mathf.Max(_maxRadius, (v - _center).magnitude);
-            if (_seamGroups == null) BuildSeamGroups(); // mang long nhau khong duoc giu qua bien dich lai
+            if (_seamGroups == null) BuildSeamGroups(); // jagged arrays are not kept across recompiles
             if (_deformed == null || _deformed.Length != _baseVertices.Length) _deformed = new Vector3[_baseVertices.Length];
             return;
         }
@@ -291,7 +283,7 @@ public class SquishyPinchable : MonoBehaviour
         var byPosition = new System.Collections.Generic.Dictionary<Vector3, System.Collections.Generic.List<int>>();
         for (int i = 0; i < _baseVertices.Length; i++)
         {
-            // Lam tron de 2 dinh "trung nhau" nhung lech nhau sai so float van gom chung nhom
+            // Rounded so that two "identical" vertices differing by float error still group together
             Vector3 key = new Vector3(
                 Mathf.Round(_baseVertices[i].x * 1e5f),
                 Mathf.Round(_baseVertices[i].y * 1e5f),
@@ -328,7 +320,7 @@ public class SquishyPinchable : MonoBehaviour
         _mesh.normals = _normals;
     }
 
-    /// <summary>Tong thoi gian (ms) moi vat bop duoc chay Tick trong KHUNG TRUOC -- ghi vao glove_diag.</summary>
+    /// <summary>Total time (ms) all squeezable objects spent in Tick in the PREVIOUS frame, written to glove_diag.</summary>
     public static float FrameMs { get; private set; }
     private static int s_msFrame = -1;
     private static float s_msAcc;
@@ -342,8 +334,7 @@ public class SquishyPinchable : MonoBehaviour
         s_msAcc += ms;
     }
 
-    /// <summary>Doc vi tri dau ngon cua moi tay roi chay mot buoc. Public de
-    /// chay thu ngoai Play mode.</summary>
+    /// <summary>Reads every hand's fingertips and runs one step. Public so it can run outside Play mode.</summary>
     public void Tick(float dt)
     {
         EnsureInitialized();
@@ -353,8 +344,8 @@ public class SquishyPinchable : MonoBehaviour
         {
             Transform thumb = _hands[h].thumbTip;
             Transform index = _hands[h].indexTip;
-            // Mat dau tay (Quest tat 2 transform) -> tay nay coi nhu da buong
-            // ra: khong an lun, dang cam thi tha.
+            // Hand lost (the Quest deactivated the two transforms) -> this hand counts as open:
+            // no denting, and a held object is released.
             _handValid[h] = thumb != null && index != null &&
                             thumb.gameObject.activeInHierarchy && index.gameObject.activeInHierarchy;
             if (!_handValid[h]) continue;
@@ -367,19 +358,18 @@ public class SquishyPinchable : MonoBehaviour
         StepHands(dt);
     }
 
-    /// <summary>Tay gan theo dau: khong co chieu sau that -> do theo goc nhin.</summary>
+    /// <summary>Head-attached hand: no real depth -> measured in the view plane.</summary>
     private bool IsHeadLocked(Transform tip) =>
         _measureInViewPlane && _viewReference != null && tip.IsChildOf(_viewReference);
 
-    /// <summary>Vi tri dau ngon dung de tinh: tay tran = vi tri 3D that,
-    /// tay gan theo dau = keo ve do sau cua vat (xem _measureInViewPlane).</summary>
+    /// <summary>Fingertip position used for computing: bare hand = the real 3D position,
+    /// head-attached hand = pulled to the object's depth (see _measureInViewPlane).</summary>
     private Vector3 MeasurePoint(Transform tip) =>
         IsHeadLocked(tip) ? ToObjectDepth(tip.position) : tip.position;
 
-    /// <summary>Truot diem doc theo TIA NHIN tu mat cho toi khi no cung do sau
-    /// voi tam vat -- nhin tu mat thi diem khong he di chuyen. Phai di theo tia
-    /// (khong di song song huong nhin) vi tay chi cach mat vai chuc cm, phoi
-    /// canh rat manh: truot song song se lam diem lech han cho tren man hinh.</summary>
+    /// <summary>Slides a point along the VIEW RAY from the eyes until it is at the object centre's depth -- seen from the eyes the
+    /// point does not move at all. It must slide along the ray (not parallel to the view direction) because the hand is only tens of
+    /// cm from the eyes and perspective is strong: sliding in parallel would visibly move the point on screen.</summary>
     private Vector3 ToObjectDepth(Vector3 worldPoint)
     {
         Vector3 eye = _viewReference.position;
@@ -390,17 +380,16 @@ public class SquishyPinchable : MonoBehaviour
         return eye + (worldPoint - eye) * (objectDepth / pointDepth);
     }
 
-    // --- Cho thi nghiem -------------------------------------------------------
+    // --- For experiments ---------------------------------------------------------
 
-    /// <summary>Do lun toi da, theo phan cua ban kinh (vd 0.25).</summary>
+    /// <summary>Maximum compression, as a fraction of the radius (e.g. 0.25).</summary>
     public float MaxIndentFraction
     {
         get => _maxIndent;
         set => _maxIndent = Mathf.Clamp(value, 0.02f, 0.6f);
     }
 
-    /// <summary>Dua vat ve trang thai ban dau: khong bi cam, het lun, nam o
-    /// cho _home (neu co). Dung khi bat dau moi luot thi nghiem.</summary>
+    /// <summary>Resets the object: not held, no dents, at _home (if set). Used at the start of every experiment trial.</summary>
     public void ResetState()
     {
         EnsureHandState();
@@ -421,15 +410,14 @@ public class SquishyPinchable : MonoBehaviour
         if (_mesh != null) ApplyDeformation();
     }
 
-    // --- Cho tang haptic ------------------------------------------------------
+    // --- For the haptic layer ----------------------------------------------------
 
-    /// <summary>Do lun toi da (met) -- de tang haptic chuan hoa luc.</summary>
+    /// <summary>Maximum compression (m), for the haptic layer to normalise force.</summary>
     public float MaxIndentMeters => _maxIndent * _radius * transform.lossyScale.x;
 
-    /// <summary>Da dau ngon (vi tri THAT, chua bi FingertipSurfaceConstraint day
-    /// ra) dang an sau bao nhieu (met) vao be mat GOC cua vat. Duong = dang an
-    /// vao, am = con cach be mat. Day chinh la do lech giua "ngon that" va
-    /// "ngon dai dien nam tren be mat" trong phuong phap god-object -> luc.</summary>
+    /// <summary>How deep (m) the fingertip skin (REAL position, before FingertipSurfaceConstraint pushes it out) is into the object's
+    /// ORIGINAL surface. Positive = pressing in, negative = still away from the surface. This is exactly the gap between the "real finger"
+    /// and the "proxy finger on the surface" in the god-object method -> the force.</summary>
     public bool TryGetSkinDepth(Transform tip, out float depthMeters)
     {
         depthMeters = float.NegativeInfinity;
@@ -439,9 +427,8 @@ public class SquishyPinchable : MonoBehaviour
         return true;
     }
 
-    /// <summary>Huong phap tuyen (the gioi, huong RA NGOAI vat) tai cho dau ngon
-    /// cham -- huong luc vat day nguoc len ngon. Xap xi bang huong tu tam vat toi
-    /// dau ngon (dung voi vat tron nhu qua bong).</summary>
+    /// <summary>Surface normal (world, pointing OUT of the object) where the fingertip touches -- the direction the object pushes back
+    /// on the finger. Approximated by the direction from the object centre to the fingertip (exact for round objects like a ball).</summary>
     public Vector3 ContactNormal(Transform tip)
     {
         if (tip == null) return Vector3.up;
@@ -449,8 +436,8 @@ public class SquishyPinchable : MonoBehaviour
         return d.sqrMagnitude > 1e-12f ? d.normalized : Vector3.up;
     }
 
-    /// <summary>Vat co dang bi CHINH ban tay chua dau ngon nay cam khong.
-    /// Dau ngon khong thuoc tay nao trong _hands -> chi can vat dang bi cam.</summary>
+    /// <summary>Whether the object is held by the very hand this fingertip belongs to.
+    /// A fingertip not belonging to any hand in _hands -> only requires that the object is held.</summary>
     public bool IsHeldBy(Transform tip)
     {
         if (_heldBy < 0 || _hands == null) return false;
@@ -461,20 +448,18 @@ public class SquishyPinchable : MonoBehaviour
         return true;
     }
 
-    /// <summary>Dau ngon nay thuoc tay DANG CAM vat khong (tay la -> false,
-    /// khac IsHeldBy).</summary>
+    /// <summary>Whether this fingertip belongs to the hand HOLDING the object (an unknown hand -> false, unlike IsHeldBy).</summary>
     public bool IsHoldingTip(Transform tip)
     {
         if (_heldBy < 0 || tip == null || _hands == null || _heldBy >= _hands.Length) return false;
         return _hands[_heldBy].thumbTip == tip || _hands[_heldBy].indexTip == tip;
     }
 
-    /// <summary>Khi dang cam: diem tren be mat HIEN TAI (da lun) ma hinh anh dau
-    /// ngon nen nam -- ca khi ngon that da lot vao trong LAN khi dang ho ra ngoai
-    /// (toi _snapMaxGap). Tinh trong 3D that de nhin bang ca 2 mat deu thay ngon
-    /// cham vat. Vi tri ngon that (du lieu) khong doi -> muc bop/luc van dung.</summary>
-    /// <param name="handTip">Transform dau ngon ma vat dang doc (trong _hands).</param>
-    /// <param name="visualTipWorld">Vi tri dau ngon cua HINH ANH tay (co the la bo xuong khac, vd tay tran).</param>
+    /// <summary>While held: the point on the CURRENT (dented) surface where the drawn fingertip should be -- both when the real finger is
+    /// inside AND when it is away from the surface (up to _snapMaxGap). Computed in real 3D so both eyes see the finger touch the object.
+    /// The real finger position (the data) is unchanged -> the squeeze level / force stays correct.</summary>
+    /// <param name="handTip">The fingertip transform the object reads (in _hands).</param>
+    /// <param name="visualTipWorld">Position of the DRAWN hand's fingertip (may be a different skeleton, e.g. the bare hand).</param>
     public bool TryGetHeldContact(Transform handTip, Vector3 visualTipWorld, out Vector3 contactWorld)
     {
         contactWorld = visualTipWorld;
@@ -486,25 +471,23 @@ public class SquishyPinchable : MonoBehaviour
         if (dist < 1e-6f) return false;
         Vector3 dir = local / dist;
         float onSurface = CurrentSurfaceRadius(dir) + _fingerRadius / scale;
-        if ((dist - onSurface) * scale > _snapMaxGap) return false; // ho qua xa -> sap tha, de yen
+        if ((dist - onSurface) * scale > _snapMaxGap) return false; // too far away -> about to release, leave it
         contactWorld = transform.TransformPoint(_center + dir * onSurface);
         return true;
     }
 
-    // --- Chong ngon tay xuyen vao vat -----------------------------------------
+    // --- Keeping fingers from going through the object ---------------------------
 
-    /// <summary>Kiem tra da dau ngon co dang lot vao TRONG be mat hien tai
-    /// (da tinh ca vet lun) khong. Neu co, tra ve vi tri dau ngon moi sao cho
-    /// da ngon vua cham be mat -- FingertipSurfaceConstraint se uon ngon tay
-    /// ao toi do.</summary>
+    /// <summary>Checks whether the fingertip skin is INSIDE the current surface (including dents). If so, returns the new fingertip
+    /// position where the skin just touches the surface -- FingertipSurfaceConstraint bends the virtual finger there.</summary>
     public bool TryResolvePenetration(Transform tip, out Vector3 resolvedWorld)
     {
         resolvedWorld = tip != null ? tip.position : Vector3.zero;
         if (_baseVertices == null || tip == null) return false;
         Vector3 tipWorld = tip.position;
 
-        // Voi tay gang (do theo goc nhin): dua dau ngon ve do sau cua vat,
-        // tinh o do, roi dua nguoc ve do sau cu cua ngon.
+        // Glove hand measured in the view plane: move the fingertip to the object's depth, compute there,
+        // then move it back to the finger's original depth.
         bool projected = IsHeadLocked(tip);
         Vector3 eye = Vector3.zero;
         float depthRatio = 1f;
@@ -533,19 +516,19 @@ public class SquishyPinchable : MonoBehaviour
         return true;
     }
 
-    /// <summary>Tay chua dau ngon nay do theo goc nhin (gan dau) -> FingertipSurfaceConstraint chi xet
-    /// dau ngon nhu cu (TryResolvePenetration / TryGetHeldContact), khong xet doc ca ngon.</summary>
+    /// <summary>The hand of this fingertip is measured in the view plane (head-attached) -> FingertipSurfaceConstraint only checks the
+    /// fingertip as before (TryResolvePenetration / TryGetHeldContact), not the whole finger.</summary>
     public bool MeasuresInViewPlane(Transform tip) => tip != null && IsHeadLocked(tip);
 
-    /// <summary>Tam vat (the gioi).</summary>
+    /// <summary>Object centre (world).</summary>
     public Vector3 CenterWorld => transform.TransformPoint(_center);
 
-    /// <summary>Dang cam bang dau ngon nay va cho phep dat ngon ao len be mat (_snapHeldFingertips).</summary>
+    /// <summary>Held by this fingertip and the virtual fingers may be placed on the surface (_snapHeldFingertips).</summary>
     public bool SnapsHeldTip(Transform handTip) => _snapHeldFingertips && _baseVertices != null && IsHoldingTip(handTip);
 
-    /// <summary>Dang kep doi xung (_symmetricPinch) bang dau ngon nay: diem TRUC ngon (ngon day fingerRadius met) can
-    /// dat de bung ngon nam dung day vet lun cua no -- ngon cai o -truc kep, ngon tro o +truc kep, doi nhau qua tam.
-    /// grip = truc kep (the gioi, ngon cai -> ngon tro).</summary>
+    /// <summary>Symmetric pinch (_symmetricPinch) with this fingertip: the point on the finger AXIS (finger thickness fingerRadius m) that puts the
+    /// pad exactly at the bottom of its dent -- the thumb on the -pinch axis side, the index on the +pinch axis side, opposite each other through the centre.
+    /// grip = the pinch axis (world, thumb -> index).</summary>
     public bool TryGetPinchTarget(Transform handTip, float fingerRadius, out Vector3 target, out Vector3 grip)
     {
         target = grip = default;
@@ -557,13 +540,13 @@ public class SquishyPinchable : MonoBehaviour
         return true;
     }
 
-    /// <summary>Dang kep doi xung: do lech tam bong doc truc kep (met, + = ve phia ngon tro) so voi giua 2 dau ngon that.</summary>
+    /// <summary>Symmetric pinch: offset of the ball centre along the pinch axis (m, + = towards the index) from the middle of the real fingertips.</summary>
     public float PinchShift => _pinchShift;
 
-    /// <summary>Dat do lech tam bong doc truc kep (met, + = ve phia ngon tro). FingertipSurfaceConstraint goi khi 1 ngon ao
-    /// phai voi qua tam thoai mai: tay gang khong co bong that nen khe 2 ngon that (vd 58 mm) hep hon bong ao + do day
-    /// ngon (76 mm) -- dat bong o giua thi ngon tro phai duoi thang han (bung ngon cach khop goc 65 mm = dai toi da) moi
-    /// cham, sinh dang ngon quap. Dich bong ve phia ngon cai (voi xa hon) thi 2 ngon deu cong tu nhien.</summary>
+    /// <summary>Sets the offset of the ball centre along the pinch axis (m, + = towards the index). FingertipSurfaceConstraint calls it when a virtual
+    /// finger has to reach beyond its comfortable range: with the glove there is no real ball, so the real finger gap (e.g. 58 mm) is narrower than the
+    /// virtual ball + finger thickness (76 mm) -- with the ball in the middle the index must stretch fully (pad 65 mm from the base joint = full length) to
+    /// touch, giving a hooked finger. Moving the ball towards the thumb (which reaches further) lets both fingers curve naturally.</summary>
     public void SetPinchShift(float meters)
     {
         if (!_symmetricPinch || _heldBy < 0) return;
@@ -576,12 +559,12 @@ public class SquishyPinchable : MonoBehaviour
         transform.position += axisW * delta;
     }
 
-    /// <summary>Ho toi da (met) giua ngon ao va be mat ma van keo ngon ao xuong be mat khi dang cam.</summary>
+    /// <summary>Maximum gap (m) between a virtual finger and the surface for which it is still pulled onto the surface while held.</summary>
     public float SnapMaxGap => _snapMaxGap;
 
-    /// <summary>Khoang cach co dau (met, 3D that) tu MAT ngon tay -- truc ngon di qua `point`, ngon day
-    /// `radius` -- toi be mat HIEN TAI (da lun). Am = da lot vao trong. onSurface = vi tri truc ngon de mat
-    /// ngon vua cham be mat. Diem o xa vat: tra ve uoc luong duong, khong tinh be mat (cho nhanh).</summary>
+    /// <summary>Signed distance (m, real 3D) from the finger SURFACE -- finger axis through `point`, finger thickness `radius` -- to the
+    /// CURRENT (dented) surface. Negative = inside. onSurface = finger-axis position where the finger surface just touches the object.
+    /// Points far from the object: returns a positive estimate without computing the surface (fast).</summary>
     public float SkinGap(Vector3 point, float radius, out Vector3 onSurface)
     {
         onSurface = point;
@@ -605,8 +588,8 @@ public class SquishyPinchable : MonoBehaviour
         return Mathf.Sign(x) * (1f - e) / (1f + e);
     }
 
-    /// <summary>Be mat HIEN TAI (sau khi lun) cach tam bao xa theo huong nay --
-    /// cung cong thuc voi ApplyDeformation, chi tinh cho 1 huong.</summary>
+    /// <summary>How far the CURRENT (dented) surface is from the centre in this direction -- the same formula as ApplyDeformation,
+    /// computed for one direction only.</summary>
     private float CurrentSurfaceRadius(Vector3 dir)
     {
         float surface = SupportRadius(dir);
@@ -625,9 +608,8 @@ public class SquishyPinchable : MonoBehaviour
         return r;
     }
 
-    /// <summary>Mot buoc mo phong voi vi tri 2 dau ngon cua TAY DAU TIEN (toa
-    /// do the gioi, khong chieu theo goc nhin); cac tay khac coi nhu buong ra.
-    /// Public de co the chay thu ngoai Play mode.</summary>
+    /// <summary>One simulation step with the FIRST hand's two fingertips (world coordinates, not projected into the view plane);
+    /// other hands count as open. Public so it can run outside Play mode.</summary>
     public void Step(Vector3 thumbWorld, Vector3 indexWorld, float dt)
     {
         EnsureInitialized();
@@ -642,7 +624,7 @@ public class SquishyPinchable : MonoBehaviour
         StepHands(dt);
     }
 
-    /// <summary>Mot buoc mo phong voi _points / _handValid da dien san.</summary>
+    /// <summary>One simulation step with _points / _handValid already filled in.</summary>
     private void StepHands(float dt)
     {
         if (dt <= 0f) return;
@@ -652,19 +634,19 @@ public class SquishyPinchable : MonoBehaviour
         ApplyDeformation();
     }
 
-    // --- Dinh vao tay ---------------------------------------------------------
+    // --- Attaching to the hand ---------------------------------------------------
 
     private void UpdateGrab(float dt)
     {
         float scale = transform.lossyScale.x;
         Vector3 centerWorld = transform.TransformPoint(_center);
 
-        // 1. Tay dang cam con giu tiep khong?
+        // 1. Is the holding hand still holding?
         if (_heldBy >= 0)
         {
             int h = _heldBy;
-            // Mat dau tay: giu vat them _lostGraceSeconds (tay hay mat 1 chut khi
-            // xoay/che khuat), qua lau moi tha.
+            // Hand lost: keep the object for _lostGraceSeconds (the hand is often lost briefly when turning / occluded),
+            // release only after longer.
             _lostTimer = _handValid[h] ? 0f : _lostTimer + dt;
             bool release = _lostTimer > _lostGraceSeconds;
             if (_handValid[h])
@@ -672,20 +654,19 @@ public class SquishyPinchable : MonoBehaviour
                 float gap = Vector3.Distance(_points[2 * h], _points[2 * h + 1]);
                 _tightestGap[h] = Mathf.Min(_tightestGap[h], gap);
 
-                // 2 dau ngon da mo rong hon duong kinh vat -> khong con kep duoc nua.
-                // Nguong THA phai rong hon nguong CAM (_grabMargin): neu khong, ngon
-                // vua lot vao vung cam da nam ngoai vung tha -> cam roi tha ngay.
+                // The fingertips opened wider than the object's diameter -> they can no longer pinch it.
+                // The RELEASE threshold must be wider than the GRAB threshold (_grabMargin): otherwise a finger that just entered the
+                // grab zone would already be outside the release zone -> grab and immediately release.
                 bool widerThanObject = gap > 2f * (_radius * scale + _fingerRadius + _grabMargin + _releaseMargin);
-                // 2 ngon da bat dau mo ra so voi luc bop chat nhat -> nguoi dung muon tha.
-                // Moc "chat nhat" khong duoc nho hon muc vat LUN TOI DA: ngon that bop
-                // xuyen sau vao vat (do bang glove_diag: 2 dau ngon con 2-4 cm trong khi
-                // vat 6 cm chi lun duoc ~1.5 cm), neu lay moc do thi chi can noi tay 1 cm
-                // -- van con an sau trong vat -- la vat da roi.
+                // The fingers started to open compared with the tightest squeeze -> the user wants to release.
+                // The "tightest" reference must not be smaller than the gap at MAXIMUM compression: the real fingers squeeze deep into the
+                // object (measured: the two tips 2-4 cm apart while a 6 cm object only compresses ~1.5 cm); with that reference relaxing the
+                // hand by 1 cm -- still deep inside the object -- would already drop it.
                 float squeezedGap = 2f * (_radius * scale + _fingerRadius - MaxIndentMeters);
                 float tightest = Mathf.Max(_tightestGap[h], squeezedGap);
                 bool opening = _releaseRule == ReleaseRule.WhenFingersOpen && gap > tightest + _releaseOpening;
                 release = widerThanObject || opening;
-                // Phai mo lien tuc mot chut moi tha (xem _releaseDelay).
+                // The opening must last a little before releasing (see _releaseDelay).
                 _releaseTimer = release ? _releaseTimer + dt : 0f;
                 release = _releaseTimer >= _releaseDelay;
             }
@@ -699,7 +680,7 @@ public class SquishyPinchable : MonoBehaviour
             }
         }
 
-        // 2. Tay nao kep dung cach thi cam (neu chua ai cam)
+        // 2. A hand pinching correctly grabs the object (if nobody holds it)
         for (int h = 0; h < _handValid.Length; h++)
         {
             if (!_handValid[h])
@@ -711,16 +692,15 @@ public class SquishyPinchable : MonoBehaviour
             Vector3 thumb = _points[2 * h];
             Vector3 index = _points[2 * h + 1];
 
-            // Bat dau cam: ca 2 dau ngon deu sat be mat VA o 2 phia doi dien
-            // nhau (cham 2 ngon cung 1 phia thi chi la cham, chua phai cam).
+            // Grab starts: both fingertips close to the surface AND on opposite sides
+            // (two fingers on the same side is just touching, not grabbing).
             bool opposite = Vector3.Dot(thumb - centerWorld, index - centerWorld) < 0f;
             bool canGrab = opposite &&
                            SurfaceDistance(thumb, scale) < _grabMargin &&
                            SurfaceDistance(index, scale) < _grabMargin;
 
-            // Vua tha xong thi 2 ngon van con sat be mat -> neu khong chan, khung
-            // hinh sau lai cam lai ngay. Chi cho cam lai khi ngon da ROI khoi
-            // vung cam it nhat 1 lan.
+            // Right after releasing, the two fingers are still close to the surface -> without this block the next frame would grab
+            // again at once. Only allow a new grab once the fingers have LEFT the grab zone at least once.
             if (_regrabBlocked[h])
             {
                 if (!canGrab) _regrabBlocked[h] = false;
@@ -749,14 +729,12 @@ public class SquishyPinchable : MonoBehaviour
         Transform heldWrist = _heldBy >= 0 ? _hands[_heldBy].wrist : null;
         if (heldWrist != null)
         {
-            // Gan vao co tay nhu cam vat that: di chuyen/xoay dung theo co tay, khong
-            // tre, khong rung theo dau ngon. Mat dau tay (Quest tat co tay) thi vat
-            // dung yen cho toi khi tay hien lai.
+            // Fixed to the wrist like a real held object: moves / rotates exactly with the wrist, no lag, no shaking with the fingertips.
+            // If the hand is lost (the Quest deactivates the wrist) the object stays put until the hand reappears.
             if (_handValid[_heldBy] && heldWrist.gameObject.activeInHierarchy)
             {
-                // Tu tu truot ve giua 2 dau ngon (sua lech, vd khi doi cach kep). Dung vi
-                // tri 3D THAT (ke ca tay gang) de sua ca lech chieu sau; truot cham nen
-                // nhieu chieu sau cua tay gang duoc lay trung binh.
+                // Slowly slide back to the middle of the two fingertips (corrects offsets, e.g. after changing grip). Uses the REAL 3D
+                // positions (also for the glove hand) to correct depth offsets too; sliding slowly averages out the glove hand's depth noise.
                 Vector3 mid = (_rawPoints[2 * _heldBy] + _rawPoints[2 * _heldBy + 1]) * 0.5f;
                 if (_symmetricPinch) mid += transform.TransformDirection(_pinchAxis).normalized * _pinchShift;
                 Vector3 wanted = heldWrist.InverseTransformPoint(mid + (transform.position - centerWorld));
@@ -766,12 +744,12 @@ public class SquishyPinchable : MonoBehaviour
         }
         else if (_heldBy >= 0 && _handValid[_heldBy])
         {
-            // Vat truot ve giua 2 dau ngon, va xoay theo truc noi 2 dau ngon
-            // (nhu vat bi kep that xoay theo tay).
+            // The object slides to the midpoint of the two fingertips and rotates with the line between them
+            // (like a really pinched object turning with the hand).
             Vector3 thumb = _points[2 * _heldBy];
             Vector3 index = _points[2 * _heldBy + 1];
             Vector3 mid = (thumb + index) * 0.5f;
-            Vector3 offset = transform.position - centerWorld; // tam mesh co the lech pivot
+            Vector3 offset = transform.position - centerWorld; // the mesh centre may be offset from the pivot
             transform.position = Vector3.Lerp(transform.position, mid + offset, follow);
 
             Vector3 axis = index - thumb;
@@ -780,7 +758,7 @@ public class SquishyPinchable : MonoBehaviour
                 transform.rotation = Quaternion.FromToRotation(_grabAxis, axis.normalized) * _grabRotation;
             }
         }
-        else if (_heldBy < 0 && _home != null) // dang cam ma tay tam mat dau -> dung yen, khong quay ve
+        else if (_heldBy < 0 && _home != null) // held while the hand is briefly lost -> stays put, does not return home
         {
             float back = 1f - Mathf.Exp(-_returnSpeed * dt);
             transform.position = Vector3.Lerp(transform.position, _home.position, back);
@@ -788,7 +766,7 @@ public class SquishyPinchable : MonoBehaviour
         }
     }
 
-    /// <summary>Khoang cach (met) tu DA dau ngon toi be mat vat, am = da ngon da an vao trong.</summary>
+    /// <summary>Distance (m) from the fingertip SKIN to the object's surface, negative = the skin is inside.</summary>
     private float SurfaceDistance(Vector3 worldPoint, float scale)
     {
         Vector3 local = transform.InverseTransformPoint(worldPoint) - _center;
@@ -797,7 +775,7 @@ public class SquishyPinchable : MonoBehaviour
         return (dist - SupportRadius(local / dist)) * scale - _fingerRadius;
     }
 
-    // --- Do lun ---------------------------------------------------------------
+    // --- Compression -------------------------------------------------------------
 
     private void UpdateIndents(float dt)
     {
@@ -805,12 +783,12 @@ public class SquishyPinchable : MonoBehaviour
         float fingerRadius = _fingerRadius / transform.lossyScale.x;
         float overshoot = 0f;
         float deepest = 0f;
-        // Lo xo luon giam chan gan toi han (ti le >= 0.8): truoc day 18 voi do cung 300 (ti le 0.52) -> vet lun nay
-        // qua lai vai lan theo tung lan dau ngon nhay -> nhin lung tung.
+        // The spring is always damped close to critical (ratio >= 0.8): 18 with stiffness 300 (ratio 0.52) made the dents bounce a few
+        // times with every fingertip jump -> looked jittery.
         float damping = Mathf.Max(_damping, 1.6f * Mathf.Sqrt(Mathf.Max(_stiffness, 0f)));
 
-        // Dang cam bang 2 ngon: 2 vet lun cua tay nay nam DOI XUNG tren truc kep (ngon cai o -truc, ngon tro o +truc),
-        // cung do sau -- 2 luc doi nhau qua tam bong. Truc + do sau deu loc cham: khong chay theo dau ngon that rung.
+        // Held with two fingers: this hand's two dents are SYMMETRIC on the pinch axis (thumb on -axis, index on +axis), with the same
+        // depth -- two opposing forces through the ball centre. Axis and depth are both filtered slowly: they do not chase the jittery real fingertips.
         bool pinching = _symmetricPinch && _heldBy >= 0 && _heldBy < _handValid.Length && _handValid[_heldBy];
         if (pinching)
         {
@@ -818,8 +796,8 @@ public class SquishyPinchable : MonoBehaviour
             float gap = a.magnitude;
             if (gap > 1e-6f)
                 _pinchAxis = Vector3.Slerp(_pinchAxis, a / gap, 1f - Mathf.Exp(-dt / Mathf.Max(_pinchAxisSeconds, 1e-3f))).normalized;
-            // Ngon that an vao moi ben bao nhieu so voi luc vua cham 2 mat (tay gang khong co gi chan -> hay an rat sau);
-            // tanh: lun tang dan roi bao hoa o muc toi da (bong cang bop cang cung), khong dung khung dot ngot.
+            // How far each real finger presses in compared with just touching both faces (the glove has nothing to stop it -> often very deep);
+            // tanh: the dent grows then saturates at the maximum (the harder the squeeze the stiffer the ball), without a sudden stop.
             float press = Mathf.Max(0f, 2f * (_radius + fingerRadius) - gap) * 0.5f;
             float depth = maxIndent * Tanh(press / Mathf.Max(maxIndent, 1e-6f));
             _pinchDepth = Mathf.Lerp(_pinchDepth, depth, 1f - Mathf.Exp(-dt / Mathf.Max(_pinchDepthSeconds, 1e-3f)));
@@ -847,8 +825,8 @@ public class SquishyPinchable : MonoBehaviour
                 target = Mathf.Clamp(pressDepth, 0f, maxIndent);
                 overshoot = Mathf.Max(overshoot, pressDepth - maxIndent);
 
-                // Chi cap nhat huong an khi dau ngon DANG an vao; khi tha,
-                // giu nguyen huong cu de vet lun nay ve dung cho cu.
+                // Only update the press direction while the fingertip IS pressing; on release keep the old direction so the dent
+                // springs back in the right place.
                 if (target > 0f)
                 {
                     _pressDir[k] = dir;
@@ -856,7 +834,7 @@ public class SquishyPinchable : MonoBehaviour
                 }
             }
 
-            // Lo xo co giam chan: do lun duoi theo muc tieu, va nay ve khi tha.
+            // Damped spring: the dent follows the target and springs back on release.
             _indentVel[k] = (_indentVel[k] + dt * _stiffness * (target - _indent[k])) / (1f + dt * damping);
             _indent[k] += _indentVel[k] * dt;
             _indent[k] = Mathf.Clamp(_indent[k], -0.3f * maxIndent, maxIndent);
@@ -867,8 +845,8 @@ public class SquishyPinchable : MonoBehaviour
         OvershootMeters = Mathf.Max(0f, overshoot) * transform.lossyScale.x;
     }
 
-    /// <summary>Be mat vat nam cach tam bao xa theo huong nay. Voi vat loi
-    /// (qua cau, khoi...) day la khoang cach chinh xac; voi vat lom thi xap xi.</summary>
+    /// <summary>How far the object's surface is from the centre in this direction. Exact for convex objects
+    /// (sphere, box...); an approximation for concave ones.</summary>
     private float SupportRadius(Vector3 dir)
     {
         float best = 0f;
@@ -886,8 +864,7 @@ public class SquishyPinchable : MonoBehaviour
         foreach (float indent in _indent) active |= Mathf.Abs(indent) > 1e-6f;
         if (!active)
         {
-            // Da ve hinh goc -- chi ghi lai mesh MOT lan roi thoi, khong ton
-            // cong tinh toan moi khung hinh khi khong ai cham vao.
+            // Back to the original shape -- write the mesh ONCE and stop, no computation every frame while nobody touches it.
             if (_meshDirty)
             {
                 _mesh.vertices = _baseVertices;
@@ -911,13 +888,12 @@ public class SquishyPinchable : MonoBehaviour
             {
                 if (Mathf.Abs(_indent[k]) < 1e-6f) continue;
 
-                // Dinh cang gan cho an thi bi day vao cang nhieu (duong cong
-                // hinh chuong), xa ra thi giam dan ve 0 -> vet lun tron, mem.
+                // Vertices closer to the press point are pushed in more (bell curve), fading to 0 further away -> a round, soft dent.
                 Vector3 contact = _center + _pressDir[k] * _pressSurface[k];
                 float w = Mathf.Exp(-(p - contact).sqrMagnitude * inv2Sigma2);
                 offset -= _pressDir[k] * (_indent[k] * w);
 
-                // Phinh ra o vung vuong goc voi huong an (quanh "bung" vat).
+                // Bulge in the region perpendicular to the press direction (around the object's "belly").
                 float side = 1f - Mathf.Abs(Vector3.Dot(radial, _pressDir[k]));
                 offset += radial * (0.5f * _bulge * _indent[k] * side * side);
             }
@@ -931,8 +907,8 @@ public class SquishyPinchable : MonoBehaviour
         _meshDirty = true;
     }
 
-    /// <summary>Tim trong CHINH ban tay dang duoc FingerUDPReceiver dieu khien
-    /// -- tranh bat nham dau ngon cua tay khac trong scene (vd tay trai).</summary>
+    /// <summary>Searches only the hand driven by FingerUDPReceiver, so the fingertips of another hand in the scene
+    /// (e.g. the left hand) are not picked up by mistake.</summary>
     private static Transform FindInScene(string name)
     {
         var receiver = FindAnyObjectByType<FingerUDPReceiver>();
