@@ -2557,8 +2557,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::GloveForceEsp32Output
   _haptics: {fileID: 807227420}
   _solver: {fileID: 807227424}
-  _thumbBoardIp: 10.42.0.166
-  _indexBoardIp: 10.42.0.166
+  _thumbBoardIp: 
+  _indexBoardIp: 
   _maxSendRateHz: 0
   _flipThumb: 0
   _flipIndex: 0
