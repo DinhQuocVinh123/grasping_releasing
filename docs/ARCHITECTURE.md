@@ -36,9 +36,15 @@ flowchart LR
    it calls **ImageHandSolver**, which turns each point into a ray from the camera *as it was when that frame was
    captured* and asks **HandImageFit** to find the wrist pose and joint angles that put every virtual joint on its ray
    (Levenberg-Marquardt; bone lengths, joint limits and a pose prior learned from bare hands fill in the missing depth).
-4. ImageHandSolver filters the result (One Euro filter, two display smoothing stages, extrapolation) and writes it to
-   the hand bones. The middle, ring and little fingers stay curled; the Quest only contributes the hand depth hint and
-   a fallback hand when the model loses the glove.
+   When the answer that continues from the previous image fits badly (e.g. the hand turned over), every interpretation is
+   tried again in that image. The virtual thumb / index are lengthened and the model's wrist point moved down to the glove
+   cuff ("Glove size" on ImageHandSolver, measured with both passthrough cameras), so the virtual hand is the glove's size.
+4. ImageHandSolver filters the result (One Euro filter, one display smoothing stage, extrapolation) and writes it to
+   the hand bones. A bad fit never stops the hand: the wrist position keeps following, only the rotation and fingers wait
+   for a good result (and the rotation follows slowly anyway once consecutive results agree for 0.3 s). Images where the
+   model's mean confidence is below 0.5 are not the glove (bare hand, controller, desk) and are ignored. The middle, ring and little fingers stay curled; the Quest contributes the hand depth hint and a
+   fallback hand when the model loses the glove. **GloveFitDebugView** draws the model's rays and the solved joints in the
+   headset (left thumbstick to show / hide).
 5. **CameraFrameCue** warns the user (orange hand, arrow, camera frame) when the hand drifts out of the camera view.
 
 End-to-end latency (camera exposure to the virtual hand on screen) is about 194 ms; `tools/analysis/latency_breakdown.py`
@@ -83,6 +89,20 @@ and only then are the virtual fingers pushed onto the surfaces. The numbers are 
 | `IsdkFingertipProxy` | 50 | Moves fingertip transforms to the bare left hand's tracked tips, so objects work with a bare hand too |
 | `CameraFrameCue` | 400 | Visual cue when the hand nears or leaves the camera view |
 | `GloveLatencyLog` | (plain C#) | Writes `glove_latency_*.csv` for FingerUDPReceiver |
+| `GloveFitDebugView` | 500 | Headset debug view: the model's 9 rays and the solved joints (left thumbstick to show / hide) |
+| `GloveReplayLab` (Editor) | - | Replay lab: runs tracker recordings through ImageHandSolver + HandImageFit with the scene's settings (Unity closed, batch mode) and writes the shown hand per frame; see below |
+
+### Replay lab (testing the virtual hand without the headset)
+
+`Assets/Editor/GloveReplayLab.cs` replays recordings made with `run_glove_quest_stream.py --record` through the headset's
+own code (`ImageHandSolver.SolveImage` / `StepDisplay` / `WriteBones`), with the camera at the origin and the Quest depth
+hint rebuilt from the recorded hint. Several parameter sets can be compared in one run (`-labSets`). Then:
+
+- `tools/analysis/replay_lab_score.py <out>`: one line per set and recording: how closely the shown hand follows the
+  model's points, frames without a glove that still move the hand ("ghost"), rotation jumps per minute, and for recordings
+  with the second camera (`kpts2`) the 3D error against the triangulated glove points.
+- `tools/analysis/replay_lab_render.py <out>/<set>/<recording> <recording dir>`: draws the shown virtual hand (skinned
+  mesh) over the camera image plus a side view, per frame or as a grid.
 
 ### Interaction
 
@@ -114,7 +134,6 @@ and only then are the virtual fingers pushed onto the surfaces. The numbers are 
 | `StiffnessDiscriminationExperiment` | 400 | Two-ball stiffness discrimination task, writes trial and event CSVs |
 | `ExperimentCsvWriter` | - | CSV writer that flushes every row |
 | `GraspLogger` | 0 | Logs bare-hand tracking and grab state every frame (`GraspLog_*.csv`) |
-| `GloveFingerLengthMeter` | 450 | Measures thumb and index length with the glove on (input to the actuator force model) |
 | `HandPoseRecorder` | 1000 | Records bare-hand joint poses (used to learn HandImageFit's pose prior) |
 
 ## Network ports
@@ -135,7 +154,6 @@ All in `Application.persistentDataPath` (`/sdcard/Android/data/<package>/files/`
 |---|---|---|
 | `glove_diag_*.csv` | FingerUDPReceiver (Log Diagnostics) | `tools/analysis/latency_diag.py`, `filter_sim.py`, `quest_raw_feasibility.py` |
 | `glove_latency_*.csv` | GloveLatencyLog (Log Diagnostics) | `tools/analysis/latency_breakdown.py` |
-| `glove_finger_lengths_*.csv` | GloveFingerLengthMeter | `tools/analysis/glove_finger_lengths.py` |
 | `Experiments/*_trials.csv`, `*_events.csv` | StiffnessDiscriminationExperiment | - |
 | `hand_pose_*.csv` | HandPoseRecorder | `HandImageFitBench.RetargetQuest` |
 | `GraspLog_*.csv` | GraspLogger | - |

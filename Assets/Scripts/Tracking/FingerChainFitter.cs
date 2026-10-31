@@ -116,6 +116,15 @@ public sealed class FingerChainFitter
         }
     }
 
+    /// <summary>World flexion axis of the joint at the base of <paramref name="bone"/>, for angles a and the parent bone at
+    /// rotation <paramref name="parentRot"/> (as JointsAt). A positive rotation about it flexes the joint.</summary>
+    public Vector3 FlexAxisAt(float[] a, Quaternion parentRot, int bone)
+    {
+        Quaternion rot = parentRot;
+        for (int j = 0; j < bone; j++) rot = rot * _rest[j] * _straight[j] * LocalDelta(j, a);
+        return rot * _rest[bone] * _straight[bone] * _flexAxis[bone];
+    }
+
     private Quaternion LocalDelta(int bone, float[] a) => bone switch
     {
         0 => Quaternion.AngleAxis(a[0], _spreadAxis) * Quaternion.AngleAxis(a[1], _flexAxis[0]),

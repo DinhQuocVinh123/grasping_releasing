@@ -64,6 +64,10 @@ public class FingerUDPReceiver : MonoBehaviour
     private int _latestFrameId;
     private readonly Vector2[] _latestUV = new Vector2[HandImageFit.Points];
     private readonly float[] _latestConf = new float[HandImageFit.Points];
+    // Middle / ring / little finger base points (the model's 9, 13, 17), sent when Python sends all 21 points (else confidence 0)
+    private static readonly int[] KnucklePoints = { 9, 13, 17 };
+    private readonly Vector2[] _latestKnuckleUV = new Vector2[HandImageFit.Knuckles];
+    private readonly float[] _latestKnuckleConf = new float[HandImageFit.Knuckles];
     private bool _latestPixelValid;
     private int _latestPixelFid;
     private Vector2 _latestDorsalUV;
@@ -134,7 +138,8 @@ public class FingerUDPReceiver : MonoBehaviour
 
         _imageSolver = GetComponent<ImageHandSolver>();
         if (_imageSolver == null) _imageSolver = gameObject.AddComponent<ImageHandSolver>();
-        _imageSolver.Initialize(this, _wrist, _fitters, palmTarget, _closedFingerAngles);
+        _imageSolver.Initialize(this, _wrist, _fitters[0], _fitters[1],
+                                new[] { _rig.middleProximal, _rig.ringProximal, _rig.pinkyProximal });
     }
 
     private void OnEnable()
@@ -176,7 +181,8 @@ public class FingerUDPReceiver : MonoBehaviour
 
     /// <summary>Latest image points (for ImageHandSolver). false = the latest packet has no valid points.
     /// dorsal: -1 Python did not report it, 0 the hexagon plate on the back of the hand was not seen, 1 seen (dorsalUV).</summary>
-    public bool TryGetPixelPoints(out int frameId, Vector2[] uv, float[] conf, out int dorsal, out Vector2 dorsalUV)
+    public bool TryGetPixelPoints(out int frameId, Vector2[] uv, float[] conf, out int dorsal, out Vector2 dorsalUV,
+                                  Vector2[] knuckleUV = null, float[] knuckleConf = null)
     {
         lock (_lock)
         {
@@ -186,6 +192,8 @@ public class FingerUDPReceiver : MonoBehaviour
             if (!_latestPixelValid || frameId <= 0) return false;
             Array.Copy(_latestUV, uv, HandImageFit.Points);
             Array.Copy(_latestConf, conf, HandImageFit.Points);
+            if (knuckleUV != null) Array.Copy(_latestKnuckleUV, knuckleUV, HandImageFit.Knuckles);
+            if (knuckleConf != null) Array.Copy(_latestKnuckleConf, knuckleConf, HandImageFit.Knuckles);
             _latency.OnPicked(frameId); // first time the virtual hand takes this image result (pick_ms column in glove_latency)
             return true;
         }
@@ -269,6 +277,19 @@ public class FingerUDPReceiver : MonoBehaviour
             _latestUV[i] = new Vector2(u, v);
             _latestConf[i] = 1f; // Python sent no "pc" -> trust all points
         }
+        for (int k = 0; k < HandImageFit.Knuckles; k++)
+        {
+            int i = KnucklePoints[k];
+            _latestKnuckleConf[k] = 0f;
+            if (i >= items.Length) continue;
+            var xy = items[i].Split('|');
+            if (xy.Length != 2 ||
+                !float.TryParse(xy[0], System.Globalization.NumberStyles.Float, inv, out float u) ||
+                !float.TryParse(xy[1], System.Globalization.NumberStyles.Float, inv, out float v))
+                continue;
+            _latestKnuckleUV[k] = new Vector2(u, v);
+            _latestKnuckleConf[k] = 1f;
+        }
         _latestPixelValid = true;
         _latestPixelFid = _latestFrameId; // "fid" comes before "pv" in the packet
     }
@@ -279,6 +300,13 @@ public class FingerUDPReceiver : MonoBehaviour
         for (int i = 0; i < HandImageFit.Points && i < items.Length; i++)
             if (float.TryParse(items[i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float c))
                 _latestConf[i] = c;
+        for (int k = 0; k < HandImageFit.Knuckles; k++)
+        {
+            int i = KnucklePoints[k];
+            if (i < items.Length && float.TryParse(items[i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float c))
+                _latestKnuckleConf[k] = Mathf.Min(_latestKnuckleConf[k], c);
+            else _latestKnuckleConf[k] = 0f;
+        }
     }
 
     // ===== BUILD THE HAND =====
@@ -312,12 +340,12 @@ public class FingerUDPReceiver : MonoBehaviour
         KeepOtherFingersClosed();
         if (_imageSolver == null || !_imageSolver.isActiveAndEnabled) return;
 
-        bool questUpdated = CaptureRawPose();
+        CaptureRawPose();
         bool trusted = _dataValid && Time.time - _lastDataTime <= _dataTimeoutSeconds;
         if (trusted) _lastTrustedTime = Time.time;
         // Holding an object during a short data loss: keep the pose longer (so the object is not dropped)
         bool holdForGrasp = !trusted && Time.time - _lastTrustedTime <= _holdPoseWhileGraspingSeconds && IsGrasping();
-        _imageSolver.Drive(questUpdated, _rawWrist, _rawWristRot, trusted, holdForGrasp);
+        _imageSolver.Drive(_rawWrist, _rawWristRot, trusted, holdForGrasp);
         MarkAligned();
     }
 
@@ -404,6 +432,12 @@ public class FingerUDPReceiver : MonoBehaviour
             // RAW Quest wrist (before GloveWristStabilizer), to test whether the Quest could compensate latency: world position,
             // whether the Quest tracked the hand this frame, high confidence, receive time (realtime). Read by tools/analysis/quest_raw_feasibility.py.
             head.Append(",qrx,qry,qrz,qvalid,qconf,qrt");
+            // RAW solve of the latest image (what GloveFitDebugView's spheres show): wrist rotation + the 8 thumb / index angles,
+            // to compare with the shown wrist (wq*) and angles (a0_*, a1_*)
+            head.Append(",srqx,srqy,srqz,srqw,ra0,ra1,ra2,ra3,ra4,ra5,ra6,ra7");
+            // Index bones just before the previous frame was rendered vs where the solver put those joints (mm; > a few mm = something
+            // else moved the bones after us, e.g. HandVisual)
+            head.Append(",rgap_mm,rgap_idx_deg,rgap_meta_deg,rgap_scale");
             _diag.WriteLine(head.ToString());
             Debug.Log($"[FingerUDPReceiver] Writing diagnostics to {path}", this);
         }
@@ -474,6 +508,13 @@ public class FingerUDPReceiver : MonoBehaviour
         sb.Append(',').Append(q != null && q.RawValid ? 1 : 0)
           .Append(',').Append(q != null && q.RawHighConfidence ? 1 : 0)
           .Append(',').Append((q != null ? q.RawTime : 0f).ToString("F4", inv));
+        Quaternion rr = ok ? s.RawRotation : Quaternion.identity;
+        foreach (float v in new[] { rr.x, rr.y, rr.z, rr.w }) sb.Append(',').Append(v.ToString("F5", inv));
+        for (int k = 0; k < 8; k++) sb.Append(',').Append((ok ? s.RawAngle(k) : 0f).ToString("F2", inv));
+        sb.Append(',').Append((ok ? s.RenderGapMm : 0f).ToString("F1", inv))
+          .Append(',').Append((ok ? s.RenderGapIndexDeg : 0f).ToString("F1", inv))
+          .Append(',').Append((ok ? s.RenderGapBetweenDeg : 0f).ToString("F1", inv))
+          .Append(',').Append((ok ? s.RenderGapScale : 0f).ToString("F4", inv));
         _diag.WriteLine(sb);
         if (Time.frameCount % 72 == 0) _diag.Flush(); // no data lost if the app is closed abruptly
     }

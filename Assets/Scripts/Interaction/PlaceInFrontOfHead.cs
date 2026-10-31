@@ -26,14 +26,59 @@ public class PlaceInFrontOfHead : MonoBehaviour
     [Tooltip("Physics objects (PhysicsPinchGrabbable) put back at their home on every re-place.")]
     [SerializeField] private PhysicsPinchGrabbable[] _snapBodies;
 
+    [Tooltip("Also re-place when the headset is put on (app started with the headset in hand) and when the user recenters " +
+             "the view (hold the Meta button), so the objects are always in front of the user.")]
+    [SerializeField] private bool _replaceOnMountAndRecenter = true;
+    [Tooltip("Give up waiting for a head pose after this long (s) and place anyway.")]
+    [SerializeField] private float _maxWaitForHead = 5f;
+
     private IEnumerator Start()
     {
         yield return new WaitForSeconds(_startDelay);
+        // The head pose may still be the origin for a while after start: wait until the headset reports a real pose.
+        float waited = 0f;
+        while (_head != null && _head.localPosition.sqrMagnitude < 1e-6f && waited < _maxWaitForHead)
+        {
+            waited += Time.unscaledDeltaTime;
+            yield return null;
+        }
+        Place();
+    }
+
+    private OVRDisplay _display; // OVRManager.display only exists once OVRManager has woken up: subscribed lazily in Update
+
+    private void OnEnable()
+    {
+        if (_replaceOnMountAndRecenter) OVRManager.HMDMounted += OnMountedOrRecentered;
+    }
+
+    private void OnDisable()
+    {
+        OVRManager.HMDMounted -= OnMountedOrRecentered;
+        if (_display != null) _display.RecenteredPose -= OnMountedOrRecentered;
+        _display = null;
+    }
+
+    private void OnMountedOrRecentered()
+    {
+        if (isActiveAndEnabled) StartCoroutine(PlaceNextFrames());
+    }
+
+    // The new head pose arrives a frame or two after the event.
+    private IEnumerator PlaceNextFrames()
+    {
+        yield return null;
+        yield return null;
         Place();
     }
 
     private void Update()
     {
+        if (_replaceOnMountAndRecenter && _display == null && OVRManager.display != null)
+        {
+            _display = OVRManager.display;
+            _display.RecenteredPose += OnMountedOrRecentered;
+        }
         if (!_recenterWithButton) return;
         if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch) ||
             (Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame))

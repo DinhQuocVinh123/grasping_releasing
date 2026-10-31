@@ -9,7 +9,6 @@ public static class HandImageFitBench
 {
     private static System.Random _rng;
     /// <summary>Hexagon plate position / normal (wrist frame) for Replay; zero = estimated from the rig.</summary>
-    public static Vector3 DorsalPoint, DorsalNormal;
     /// <summary>Replay: at image ForceFid, set the answer to (ForceP, ForceR, ForceA) before solving (0 = off).</summary>
     public static int ForceFid;
     public static float HandScale; // >0: virtual hand size as on the headset (hscale column)
@@ -112,9 +111,8 @@ public static class HandImageFitBench
                         w[i] = i == 1 ? 0.5f : 1f;
                     }
                     float gtDepth = (camInv * (gt[5] - camPos)).z;
-                    Quaternion noisyQ = Quaternion.Euler(Gauss() * 15f, Gauss() * 15f, Gauss() * 15f) * R;
                     float t0 = Time.realtimeSinceStartup;
-                    fit.Solve(camPos, camRot, dirs, w, gtDepth + Gauss() * 0.02f, noisyQ, f > 0);
+                    fit.Solve(camPos, camRot, dirs, w, gtDepth + Gauss() * 0.02f, f > 0);
                     tSum += Time.realtimeSinceStartup - t0;
                     fit.GetModelPoints(sol);
                     if (f >= 5)
@@ -143,19 +141,84 @@ public static class HandImageFitBench
         return sb.ToString();
     }
 
+    /// <summary>One camera with a Quest-like depth hint, on a moving synthetic hand with a known answer: the hint is off by depthBias
+    /// and jitters by depthNoise (m, per image; averaged like ImageHandSolver does), no rotation hint, pixel noise at the
+    /// passthrough camera's focal length (866 px at 1280 px). Reports wrist / depth / fingertip / rotation errors and reseeds.</summary>
+    public static string SyntheticQuestDepth(float noisePx = 10f, float depthBias = 0f, float depthNoise = 0.04f)
+    {
+        var sb = new StringBuilder();
+        if (!BuildModel(out Transform wrist, out var thumb, out var index)) return "khong tim thay FingerUDPReceiver";
+        var rig = Object.FindAnyObjectByType<FingerUDPReceiver>().GetComponent<HandFingerRig>();
+        Vector3 palmT = FingerChainFitter.PalmTarget(wrist, rig.indexProximal, rig.middleProximal, rig.pinkyProximal, false);
+        Vector3 C = rig.indexProximal.position;
+        Vector3 fingerDir = (rig.middleProximal.position - wrist.position).normalized;
+        Vector3 normal = (palmT - (wrist.position + rig.indexProximal.position + rig.middleProximal.position + rig.pinkyProximal.position) * 0.25f).normalized;
+        string[] names = { "nghieng", "long ban tay", "mu tay" };
+        Vector3[] camDirs =
+        {
+            (-normal * 0.2f - fingerDir * 0.5f + Vector3.up * 0.6f).normalized,
+            (normal * 0.7f - fingerDir * 0.3f).normalized,
+            (-normal * 0.7f - fingerDir * 0.2f).normalized,
+        };
+        var gt = new Vector3[9]; var sol = new Vector3[9]; var dirs = new Vector3[9]; var w = new float[9];
+        float npx = noisePx / 866f;
+        for (int cd = 0; cd < camDirs.Length; cd++)
+        {
+            _rng = new System.Random(1 + cd);
+            var fit = new HandImageFit(wrist, thumb, index);
+            Vector3 camPos = C + camDirs[cd] * 0.3f;
+            Quaternion camRot = Quaternion.LookRotation(C - camPos, Vector3.up);
+            Quaternion camInv = Quaternion.Inverse(camRot);
+            Vector3 camRight = camRot * Vector3.right, camUp = camRot * Vector3.up;
+            Vector3 P0 = wrist.position;
+            Quaternion R0 = wrist.rotation;
+            var eW = new List<float>(); var eTip = new List<float>(); var eRot = new List<float>(); var eDepth = new List<float>();
+            float img = 0f, prior = 0f; int n = 0;
+            for (int f = 0; f < 150; f++)
+            {
+                float t = f * 0.111f;
+                Vector3 P = P0 + new Vector3(0.05f * Mathf.Sin(0.4f * t), 0.03f * Mathf.Sin(0.3f * t), 0.04f * Mathf.Sin(0.25f * t));
+                Quaternion R = Quaternion.AngleAxis(20f * Mathf.Sin(0.5f * t), camRight) * Quaternion.AngleAxis(15f * Mathf.Sin(0.35f * t), camUp) * R0;
+                float s = 0.5f - 0.5f * Mathf.Cos(0.6f * t);
+                float[] ga = { 5f * s, 15f * s, 30f * s, 25f * s, 0f, 50f * s, 50f * s, 33f * s };
+                fit.ComputePoints(P, R, ga, gt);
+                for (int i = 0; i < 9; i++)
+                {
+                    Vector3 c = camInv * (gt[i] - camPos);
+                    dirs[i] = camRot * new Vector3(c.x / c.z + Gauss() * npx, c.y / c.z + Gauss() * npx, 1f);
+                    w[i] = i == 1 ? 0.5f : 1f;
+                }
+                float gtDepth = (camInv * (gt[5] - camPos)).z;
+                float z = gtDepth + depthBias + Gauss() * depthNoise;
+                prior = f == 0 ? z : Mathf.Lerp(prior, z, 1f - Mathf.Exp(-0.111f / 0.4f));
+                fit.Solve(camPos, camRot, dirs, w, prior, f > 0);
+                fit.GetModelPoints(sol);
+                if (f < 5) continue;
+                n++;
+                eW.Add((sol[0] - gt[0]).magnitude);
+                eTip.Add(Mathf.Max((sol[4] - gt[4]).magnitude, (sol[8] - gt[8]).magnitude));
+                eRot.Add(Quaternion.Angle(fit.Rotation, R));
+                eDepth.Add(Mathf.Abs(fit.Depth - gtDepth));
+                img += fit.ImageError;
+            }
+            sb.AppendFormat("{0,-13}: co tay med {1:F1} p95 {2:F1} cm | sau med {3:F1} p95 {4:F1} cm | dau ngon med {5:F1} p95 {6:F1} cm | huong med {7:F0} p95 {8:F0} do | anh {9:F3} | thu lai {10}\n",
+                names[cd], Med(eW) * 100, P95(eW) * 100, Med(eDepth) * 100, P95(eDepth) * 100,
+                Med(eTip) * 100, P95(eTip) * 100, Med(eRot), P95(eRot), img / n, fit.Reseeds);
+        }
+        return sb.ToString();
+    }
+
     /// <summary>Replays a real recording. Each line: t, fid, 9 pixel points (x, y), 9 confidences, eye position + rotation
     /// (standing in for the camera), Quest wrist (position + rotation). Approximate camera: focal length fx, principal point at the centre.
     /// Simulates a 60 Hz display (smoothed like ImageHandSolver) to count jumps like glove_diag.
     /// outPath: writes the 9 result points projected into the image (pixels) for each image, to draw over the image for checking.
-    /// The file may have 4 extra columns at the end: hexagon plate 1/0, x, y (pixels), area.</summary>
-    public static string Replay(string path, string outPath, bool useDorsal = true, bool useQuestRot = false,
-                                float fx = 950f, float width = 1280f, float height = 960f)
+    /// </summary>
+    public static string Replay(string path, string outPath, float fx = 950f, float width = 1280f, float height = 960f)
     {
-        if (!BuildFull(out Transform wrist, out var fitters, out Vector3 palmT)) return "khong tim thay FingerUDPReceiver";
+        if (!BuildFull(out Transform wrist, out var fitters, out _)) return "khong tim thay FingerUDPReceiver";
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var lines = System.IO.File.ReadAllLines(path);
-        var fit = new HandImageFit(wrist, fitters, palmT, new Vector3(75f, 95f, 60f));
-        if (DorsalNormal != Vector3.zero) fit.SetDorsalModel(DorsalPoint, DorsalNormal);
+        var fit = new HandImageFit(wrist, fitters[0], fitters[1]);
         if (HandScale > 0f) fit.SetScale(HandScale / Mathf.Max(wrist.lossyScale.x, 1e-4f));
         var rigR = Object.FindAnyObjectByType<FingerUDPReceiver>().GetComponent<HandFingerRig>();
         Quaternion wInv = Quaternion.Inverse(wrist.rotation);
@@ -164,8 +227,7 @@ public static class HandImageFitBench
         var dirs = new Vector3[9]; var w = new float[9]; var pts = new Vector3[9]; var fj = new Vector3[4];
         var o = new StringBuilder();
         float cx = width * 0.5f, cy = height * 0.5f;
-        float lastSolve = -999f, depthPrior = 0f, lastT = 0f; bool hasDepth = false, hasRot = false;
-        Quaternion rotPrior = Quaternion.identity;
+        float lastSolve = -999f, depthPrior = 0f, lastT = 0f; bool hasDepth = false;
         // display
         Vector3 dP = Vector3.zero; Quaternion dR = Quaternion.identity; var dA = new float[8]; bool hasDisp = false;
         Vector3 prevDP = Vector3.zero; Quaternion prevDR = Quaternion.identity; var prevDA = new float[8];
@@ -213,21 +275,13 @@ public static class HandImageFitBench
             }
             float since = t - lastT;
             float z = Vector3.Dot(rw - camPos, camRot * Vector3.forward) + 0.03f; // the hand centre is a little further than the wrist
-            depthPrior = !hasDepth || since > 2f ? z : Mathf.Lerp(depthPrior, z, 1f - Mathf.Exp(-since / 0.6f));
-            rotPrior = !hasRot || since > 1f ? rq : Quaternion.Slerp(rotPrior, rq, 1f - Mathf.Exp(-since / 0.3f));
-            hasDepth = hasRot = true;
+            depthPrior = !hasDepth || since > 2f ? z : Mathf.Lerp(depthPrior, z, 1f - Mathf.Exp(-since / 0.4f));
+            hasDepth = true;
             lastT = t;
 
-            int dorsal = -1; Vector3 dorsalDir = Vector3.zero; float dpx = 0f, dpy = 0f;
-            if (useDorsal && c.Length >= 47)
-            {
-                dorsal = (int)F(43); dpx = F(44); dpy = F(45);
-                if (dorsal == 1) dorsalDir = camRot * new Vector3((dpx - cx) / fx, -(dpy - cy) / fx, 1f);
-            }
             if (ForceFid > 0 && (int)F(1) == ForceFid) fit.SetSolution(ForceP, ForceR, ForceA);
             float s0 = Time.realtimeSinceStartup;
-            bool ok = fit.Solve(camPos, camRot, dirs, w, depthPrior, useQuestRot ? rotPrior : (Quaternion?)null,
-                                t - lastSolve <= 0.5f, dorsal, dorsalDir);
+            bool ok = fit.Solve(camPos, camRot, dirs, w, depthPrior, t - lastSolve <= 0.5f);
             msSum += (Time.realtimeSinceStartup - s0) * 1000f;
             if (!ok) { fails++; continue; }
             solves++;
@@ -257,13 +311,11 @@ public static class HandImageFitBench
                 foreach (float v in new[] { fr.x, fr.y, fr.z, fr.w, rq.x, rq.y, rq.z, rq.w, fit.Depth, depthPrior, t, fit.Position.x, fit.Position.y, fit.Position.z })
                     o.Append(',').Append(v.ToString("F5", inv));
                 // Middle and little finger bases of the virtual hand (not among the 9 points) -> to draw the palm
-                fit.TryGetDorsalPoint(out Vector3 dWorld);
-                foreach (Vector3 wpt in new[] { fit.Position + fit.Rotation * midL, fit.Position + fit.Rotation * pinkyL, dWorld })
+                foreach (Vector3 wpt in new[] { fit.Position + fit.Rotation * midL, fit.Position + fit.Rotation * pinkyL })
                 {
                     Vector3 q = ci * (wpt - camPos);
                     o.Append(',').Append((cx + q.x / q.z * fx).ToString("F1", inv)).Append(',').Append((cy - q.y / q.z * fx).ToString("F1", inv));
                 }
-                o.Append(',').Append(dorsal).Append(',').Append(dpx.ToString("F1", inv)).Append(',').Append(dpy.ToString("F1", inv));
                 // The 9 joints in the camera frame (m), to draw a side view
                 for (int i = 0; i < 9; i++)
                 {

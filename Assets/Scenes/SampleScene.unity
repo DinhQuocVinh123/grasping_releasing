@@ -551,59 +551,6 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 169018451}
   m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
---- !u!1 &188304132
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 188304134}
-  - component: {fileID: 188304133}
-  m_Layer: 0
-  m_Name: GloveFingerLengthMeter
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &188304133
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 188304132}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 426940bd31509ae439f4232afe135d57, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::GloveFingerLengthMeter
-  _receiver: {fileID: 807227416}
-  _streamer: {fileID: 919236456}
-  _display: {fileID: 1900173878}
-  _logToFile: 1
-  _minConfidence: 0.5
-  _edgeMargin: 0.05
-  _maxBendDegrees: 20
-  _depthRange: {x: 0.15, y: 0.9}
-  _maxSamples: 2000
---- !u!4 &188304134
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 188304132}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &219749834
 GameObject:
   m_ObjectHideFlags: 0
@@ -2109,7 +2056,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 717762663}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 9454d0795555514469a57bbe75f7c759, type: 3}
   m_Name: 
@@ -2503,7 +2450,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5004dbfa3317f514c8b8fc64fbfc862e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ImageHandSolver
-  _displaySeconds: 0.015
+  _displaySeconds: 0.025
   _minCutoff: 0.7
   _betaPosition: 200
   _betaRotation: 0.1
@@ -2518,31 +2465,30 @@ MonoBehaviour:
   _confirmDegrees: 10
   _confLow: 0.25
   _confHigh: 0.6
-  _minTrust: 0.03
-  _minGoodTrust: 0.1
-  _trustRejectsNotSlows: 1
   _rejectBelow: 0.1
-  _acceptFloor: 0.6
-  _useQuestMotion: 0
-  _questMotionLateralOnly: 1
-  _questMotionMaxMeters: 0.15
+  _acceptFloor: 0.9
+  _positionFloor: 0.5
+  _seenTrust: 0.3
   _rejectEdgePoints: 1
   _edgeMargin: 0.03
   _minInFramePoints: 5
   _minFingerPoints: 2
-  _keepFingersWhenLost: 1
   _cutForceWhenFingerFrozen: 1
-  _switchSeconds: 0.3
+  _switchSeconds: 0.2
   _holdSeconds: 1
   _blendSeconds: 0.3
-  _depthPriorSeconds: 0.6
-  _rotPriorSeconds: 0.3
+  _depthPriorSeconds: 0.4
   _warmSeconds: 0.5
   _minConfidence: 0.2
   _thumbBaseWeight: 0.5
-  _useQuestRotation: 0
-  _useDorsalTiles: 0
   _useLeftHandScale: 1
+  _thumbLength: 1
+  _indexLength: 1.12
+  _wristPointDown: 0.0376
+  _naturalFingerShape: 0
+  _indexStraightBias: {x: 10, y: 15}
+  _indexDistalRatio: {x: 0.5, y: 0.8}
+  _indexSpreadLimit: 10
 --- !u!114 &807227425
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3251,6 +3197,8 @@ MonoBehaviour:
   - {fileID: 258154970}
   _snapBodies:
   - {fileID: 670765458}
+  _replaceOnMountAndRecenter: 1
+  _maxWaitForHead: 5
 --- !u!4 &941096313
 Transform:
   m_ObjectHideFlags: 0
@@ -5085,7 +5033,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &1900173878
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -5508,6 +5456,57 @@ Transform:
   m_Children: []
   m_Father: {fileID: 1309377590}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &2098850362
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2098850364}
+  - component: {fileID: 2098850363}
+  m_Layer: 0
+  m_Name: GloveFitDebugView
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2098850363
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2098850362}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: cc83baa70a80465499eb0c4324f80e0f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GloveFitDebugView
+  _solver: {fileID: 0}
+  _material: {fileID: 2100000, guid: 5bc1ebcdc2b94134db11e6dd7f875b4c, type: 2}
+  _visible: 1
+  _rayLength: 0.6
+  _rayWidth: 0.0015
+  _jointSize: 0.008
+  _controllerModel: {fileID: 112276, guid: d9809c5e8418bb047bf2c8ba1d1a2cec, type: 3}
+--- !u!4 &2098850364
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2098850362}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -5529,4 +5528,4 @@ SceneRoots:
   - {fileID: 941096313}
   - {fileID: 670765463}
   - {fileID: 717762665}
-  - {fileID: 188304134}
+  - {fileID: 2098850364}
