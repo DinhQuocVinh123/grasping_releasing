@@ -61,6 +61,64 @@ Turn on **Log Diagnostics** on `FingerUDPReceiver` (glove hand object) to write 
 `adb pull /sdcard/Android/data/<package>/files/` and analyse them with the scripts in `tools/analysis/`
 (each script's docstring explains its input and output).
 
+## Hand-model benchmark
+
+Every hand-model checkpoint is scored on a fixed test set before it goes on the headset. The scripts and labels
+live with the hand-model program on the lab PC (not in this repo):
+
+```
+python benchmark_pick_frames.py   # picks the 227 test frames (run once, then fixed)
+Gan nhan benchmark.bat            # label 9 points per frame by hand
+python benchmark_eval.py          # score every checkpoint -> benchmark_results/results.md
+```
+
+**Test set.** 227 frames from 5 recordings (29/10–01/11) that were never used for training: 194 spread evenly over
+time and 33 taken where the headset lost the hand while recording. Each frame is labelled by hand with 9 points
+(wrist, 4 on the thumb, 4 on the index finger). 203 frames show the glove and are scored, 11 frames without the glove
+measure false alarms, and 13 frames where the glove could not be labelled (fist, occluded fingers, image edge) are
+left out. The test labels are never used for training or for tuning thresholds.
+
+**Metrics.** Errors are in pixels on the 1280×1280 camera image, where the palm (wrist to index base) is about
+370 px long.
+
+| Metric | Meaning |
+|---|---|
+| Median / p90 error | Half / 90% of the labelled points are closer than this to their label |
+| PCK@0.1 | Share of points within 0.1 palm length (about 37 px) of their label |
+| Tips correct | Share of frames where both the thumb tip and the index tip are within 0.2 palm length |
+| Usable | Tips correct **and** the frame passes the headset's own checks (sharpness, confidence, distance to the Quest hand position, plausible pose) |
+| False alarms | Share of the 11 no-glove frames that the headset would still accept as a hand |
+
+**Results** (all 203 glove frames, 2 November 2026):
+
+| Model | Median (px) ↓ | p90 (px) ↓ | PCK@0.1 ↑ | Tips correct ↑ | Usable ↑ | False alarms ↓ |
+|---|---|---|---|---|---|---|
+| RTMPose-m, original (bare hands) | 492 | 919 | 15% | 33% | 29% | **0%** (0/11) |
+| pinch_color (30/09) | 21.9 | 103 | 67% | **93%** | **92%** | 36% (4/11) |
+| gang2010 (20/10) | 19.8 | 106 | 69% | 88% | 87% | 55% (6/11) |
+| **gang2910 (29/10, in use)** | **11.7** | **53.4** | **86%** | 91% | 90% | 82% (9/11) |
+
+On harder subsets, gang2910 scores:
+
+| Subset | Frames | Median (px) | PCK@0.1 | Tips correct | Usable |
+|---|---|---|---|---|---|
+| Points corrected by the labeller | 58 | 24.5 | 63% | 72% | 67% |
+| Headset lost the hand while recording | 13 | 42.4 | 42% | 46% | 23% |
+
+What this shows:
+
+- Fine-tuning on glove images takes usable frames from 29% to about 90%; later generations mainly make the points
+  more precise (median error 21.9 → 11.7 px).
+- gang2910 is the most precise model but also raises the most **false alarms**: it accepts 9 of 11 frames with no
+  glove in view. This is its main weakness.
+- In the "lost the hand" frames the images are mostly clear and gang2910 places the points fairly well, but 9 of 13
+  are rejected because the hand centre is 1.01–1.43 hand sizes away from the Quest hand position (limit 1.0). The
+  loss comes from that check more than from the model.
+
+Limitations: the test recordings were made with gang2910, so the labelling tool prefilled its points and 145 of 203
+frames were kept unchanged; the "corrected" subset avoids this bias. One person labelled every frame. Only the 2D
+points are scored; the 3D hand fit is not.
+
 ## Tests
 
 - `tools/e2e_test/run_e2e.py`: Unity force output -> relay -> Arduino parser, end to end (Linux only: g++, mono-mcs, pyserial).
