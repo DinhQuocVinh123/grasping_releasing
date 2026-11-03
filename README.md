@@ -72,6 +72,11 @@ Gan nhan benchmark.bat            # label 9 points per frame by hand
 python benchmark_eval.py          # score every checkpoint -> benchmark_results/results.md
 ```
 
+![Overview of the hand-model pipeline](docs/benchmark/overview.png)
+
+*The part that is benchmarked: the Quest camera image is cropped around the hand, the fine-tuned RTMPose-m finds
+9 points and the headset checks them before the 3D hand is fitted. The dashed red branch runs only during training.*
+
 **Test set.** 227 frames from 5 recordings (29/10–01/11) that were never used for training: 194 spread evenly over
 time and 33 taken where the headset lost the hand while recording. Each frame is labelled by hand with 9 points
 (wrist, 4 on the thumb, 4 on the index finger). 203 frames show the glove and are scored, 11 frames without the glove
@@ -104,6 +109,14 @@ On harder subsets, gang2910 scores:
 |---|---|---|---|---|---|
 | Points corrected by the labeller | 58 | 24.5 | 63% | 72% | 67% |
 | Headset lost the hand while recording | 13 | 42.4 | 42% | 46% | 23% |
+
+![Original model vs gang2910 on the same frames](docs/benchmark/examples.jpg)
+
+*Same frames, two models. White dots are the labels and thin white lines join each label to the model's guess.
+Top: the original model, trained on bare hands, puts the points far outside the hand. Bottom: gang2910 (blue).
+The first four frames were picked to show the difference clearly (gang2910 under 12 px, the original model over
+200 px), so the tables above are the fair summary; the last is a frame where the headset lost the hand while
+recording, and both models get it wrong.*
 
 What this shows:
 
