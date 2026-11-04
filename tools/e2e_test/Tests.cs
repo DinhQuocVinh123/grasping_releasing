@@ -51,7 +51,7 @@ public static class Tests
                                                     Quaternion.AngleAxis(-10, Vector3.right) * new Vector3(0, 0, 1), Vector3.right);
         Check(Near(hyper, -10 * Mathf.Deg2Rad, 1e-4f), "hyperextension must be negative, got " + hyper);
         {
-            // Index bent 0 deg at the MCP, 30 at the PIP, 20 at the DIP -> 50 deg -> L = 80 + 10 mm/rad x 0.8727 = 88.73 mm before the 80 mm limit.
+            // Index bent 0 deg at the MCP, 30 at the PIP, 20 at the DIP -> 50 deg -> L = 95 + 10 mm/rad x 0.8727 = 103.73 mm.
             var hand = new GameObject("BentHand").transform;
             var meta = Bone(hand, "XRHand_IndexMetacarpal", new Vector3(0, 0, -0.05f), Quaternion.identity);
             var prox = Bone(meta, "XRHand_IndexProximal", Vector3.zero, Quaternion.identity);
@@ -65,7 +65,7 @@ public static class Tests
                                      .Invoke(probe, new object[] { chain, false });
             Check(Near(flex * Mathf.Rad2Deg, 50f, 0.05f), "index flexion MCP->DIP should be 50 deg, got " + flex * Mathf.Rad2Deg);
             float L = Field<float>(probe, "_indexDorsalRestLengthMm") + Field<float>(probe, "_dorsalLengthPerRadMm") * flex;
-            Check(Near(L, 88.73f, 0.05f), "L for a 50 deg bend should be 88.73 mm (sent unclamped; the relay clamps), got " + L);
+            Check(Near(L, 103.73f, 0.05f), "L for a 50 deg bend should be 103.73 mm (sent unclamped; the relay clamps), got " + L);
         }
 
         // ---- 3. the component, end to end against the Python board simulator ----
@@ -118,8 +118,8 @@ public static class Tests
         Check(boards[0].online && boards[1].online, "both simulated boards should be discovered");
         Check(boards[1].rttMs > 0 && boards[1].rttMs < 50, "RTT to the relay on localhost: " + boards[1].rttMs);
         Check(Field<float>(outp, "_gate") < 0.01f, "gate should have faded to 0 after tracking loss");
-        Check(Near(o[1].dorsalLengthMm, 80f, 0.01f) && Near(o[0].dorsalLengthMm, 80f, 0.01f),
-              $"straight fingers: L should be the rest length (80 mm for both), got thumb {o[0].dorsalLengthMm} index {o[1].dorsalLengthMm}");
+        Check(Near(o[1].dorsalLengthMm, 95f, 0.01f) && Near(o[0].dorsalLengthMm, 95f, 0.01f),
+              $"straight fingers: L should be the rest length (95 mm for both), got thumb {o[0].dorsalLengthMm} index {o[1].dorsalLengthMm}");
         Check(maxWhileOff == 0f, "a disabled HapticRenderer must send zero, not its last force: " + maxWhileOff);
         Check(backAfter > 1f, "force should come back when the renderer is re-enabled: " + backAfter);
         // Packet layout: each finger's six numbers together (contact, P, U, V, T, L), version last.

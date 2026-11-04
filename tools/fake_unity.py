@@ -8,8 +8,8 @@ Two uses:
      the relay is fine and the problem is on the Unity side.
   2. Drive the motors without Unity, with a fixed torque and actuator length you choose.
 
-  python fake_unity.py                         # index T 0.01236 N*m (1.03 N) at L 70 mm, thumb 0
-  python fake_unity.py --index-l 75            # same force, longer actuator -> higher pressure, fewer steps
+  python fake_unity.py                         # index T 0.01236 N*m (1.03 N) at L 100 mm, thumb 0
+  python fake_unity.py --index-l 105           # same force, longer actuator -> higher pressure, fewer steps
   python fake_unity.py --index-t 0 --thumb-t 0.0144     # thumb 1.2 N
   python fake_unity.py --pulse 2               # alternate force / zero every 2 s
   python fake_unity.py --host 192.168.1.23     # relay on another PC
@@ -24,7 +24,7 @@ import time
 CMD_PORT, TLM_PORT, VERSION, CMD_FLOATS = 5011, 5012, 3, 16   # GloveEsp32Protocol.cs
 
 
-def packet(seq, t, thumb_p, thumb_t, index_p, index_t, thumb_l=70.0, index_l=70.0):
+def packet(seq, t, thumb_p, thumb_t, index_p, index_t, thumb_l=100.0, index_l=100.0):
     f = [0.0] * CMD_FLOATS
     f[0], f[1], f[2] = float(seq), t, 1.0                          # seq, time, trust
     # per finger: contact, P, U, V, dorsal torque T, dorsal length L (thumb at 3, index at 9)
@@ -41,8 +41,8 @@ def main():
     ap.add_argument("--index-t", type=float, default=0.01236, help="index dorsal torque, N*m")
     ap.add_argument("--thumb-p", type=float, default=0.0, help="thumb pad force, N")
     ap.add_argument("--index-p", type=float, default=0.0, help="index pad force, N")
-    ap.add_argument("--thumb-l", type=float, default=70.0, help="thumb dorsal actuator length L, mm (sent as is; the relay clamps to the model's range)")
-    ap.add_argument("--index-l", type=float, default=70.0, help="index dorsal actuator length L, mm (sent as is; the relay clamps to the model's range)")
+    ap.add_argument("--thumb-l", type=float, default=100.0, help="thumb dorsal actuator length L, mm (sent as is; the relay clamps to the model's 95-110 mm)")
+    ap.add_argument("--index-l", type=float, default=100.0, help="index dorsal actuator length L, mm (sent as is; the relay clamps to the model's 95-110 mm)")
     ap.add_argument("--rate", type=float, default=50.0)
     ap.add_argument("--pulse", type=float, default=0.0, help="alternate force / zero every N seconds")
     args = ap.parse_args()

@@ -28,8 +28,9 @@ using Debug = UnityEngine.Debug;
 ///      the centre of pressure across the three chambers.
 ///   4. Dorsal torque: the extension torque F exerts about the finger's MCP joint.
 ///   5. Dorsal actuator length L: rest length + offset x the finger's tracked flexion over the
-///      joints the actuator spans. The relay's force model (tools/actuator_model) needs it to
-///      turn the dorsal force into an actuator pressure.
+///      joints the actuator spans. The relay's P(F, L) model (tools/actuator_model) needs it to
+///      turn the dorsal force into an actuator pressure. The relay can instead take L from another
+///      program (its --length-source external / L key), e.g. a CV estimate.
 ///
 /// Runs after HapticRenderer (150, force for this frame) and FingertipSurfaceConstraint
 /// (200, real-pose cache for this frame). Put it on the glove hand, next to HapticRenderer.
@@ -77,11 +78,11 @@ public class GloveForceEsp32Output : MonoBehaviour
     [SerializeField] private bool _dorsalIgnoresSign = true;
 
     [Header("Dorsal actuator length L (for the relay's force model)")]
-    [Tooltip("Actuator length L (mm) with the finger STRAIGHT, in the units of the force model's tether setting. " +
-             "L is sent unclamped: the relay clamps it to whatever range the force model was calibrated for " +
-             "(55-80 mm for now), so a refit model with a wider range needs no change or rebuild here.")]
-    [SerializeField] private float _thumbDorsalRestLengthMm = 80f;
-    [SerializeField] private float _indexDorsalRestLengthMm = 80f;
+    [Tooltip("Measured actuator length L (mm) with the finger STRAIGHT. PLACEHOLDER 95 = the bottom of the P(F, L) " +
+             "model's range (fitted on 95-110 mm); replace with the length measured on the worn glove. " +
+             "L is sent unclamped: the relay clamps it to the model's range, so a refit model needs no change or rebuild here.")]
+    [SerializeField] private float _thumbDorsalRestLengthMm = 95f;
+    [SerializeField] private float _indexDorsalRestLengthMm = 95f;
     [Tooltip("How much L grows per radian of finger flexion, mm/rad: the actuator runs along the back of the finger, " +
              "about this far from each joint's axis, so bending a joint by theta stretches it by offset x theta. " +
              "Summed over every joint from the dorsal joint to the tip. PLACEHOLDER: about the finger's half-thickness; " +

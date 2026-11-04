@@ -1,0 +1,22 @@
+{
+  "model_id": "pfl-braided-nghia-2026-10-28",
+  "source": "Tran Van Nghia, 'A P(F, L) model for a braided hydraulic actuator', 28 Oct 2026 (Scripts/ForceModelActuator/NewData: image.png = these numbers, fit_results.mat = the fit)",
+  "units": {"L": "mm, measured actuator length", "F": "N", "P": "bar"},
+  "length_domain_mm": [95.0, 110.0],
+  "comment": "P = P* + (F_el + F_f0*s - a1*P* - F) / D above the knee P*; s = +1 pressurize (pressure rising), -1 release",
+  "F_el": {"c_lin": 0.03285, "c_inv2": 13476.0, "comment": "tube elasticity: F_el = c_lin*L - c_inv2/L^2 (N)"},
+  "a1": {"c": 23.34, "comment": "pressure on the bore: a1 = c/L (N/bar)"},
+  "P_star": {"c": 17.09, "exp": -0.910, "hyst": 0.0245, "comment": "knee: P* = c*L^exp + hyst*s (bar)"},
+  "D": {"c": 7.854, "k_num": 5.76e-5, "k_den": 1.92e-5, "comment": "slope above the knee: D = c*(1 - k_num*L^2)/(1 - k_den*L^2) (N/bar)"},
+  "F_f0": 0.0034,
+  "fit": {
+    "parameters": {"mu_MPa": 0.258916897, "L0_mm": 74.3209048, "alpha0_deg": 71.0351218, "Pstar0_bar": 0.339003790,
+                   "n": 0.910128264, "w_bar": 0.0195409102, "H_bar": 0.0244789169, "Ff0_N": 0.00335967294},
+    "fixed": {"bore_radius_mm": 1.0, "braid_radius_mm": 5.0, "wall_area_mm2": 9.42477796},
+    "recordings_mm": [95, 100, 105, 110],
+    "R2_F": 0.998, "RMSE_F_N": 0.022, "R2_P": 0.987, "RMSE_P_bar": 0.022,
+    "leave_one_length_out_R2_P": [0.979, 0.987],
+    "force_offset_N": -0.0742
+  },
+  "check": {"L": 100.0, "F": 1.394, "s": 1, "P": 0.400, "comment": "worked example from image.png"}
+}

@@ -45,7 +45,9 @@ trained checkpoint) is **not in this repository**; it lives with its own virtual
    python tools/glove_serial_bridge.py --list        # find the Mega's COM port
    python tools/glove_serial_bridge.py --port COM5
    ```
-   Use `--dry-run` to see the serial lines without an Arduino.
+   Use `--dry-run` to see the serial lines without an Arduino. The dorsal actuator length comes from Unity by
+   default; `--length-source external` (or pressing L in the relay window) takes it from another program on UDP 5013
+   instead (format in `tools/send_actuator_length.py`).
 3. **Arduino Mega:** upload `arduino/glove_mega_steppers/glove_mega_steppers.ino`, then press SW4 (HOME) before
    SW5 (RUN). SW6 stops everything.
 4. **Headset:** build `SampleScene` for Android, install the APK and start it. The headset finds the PC by itself
@@ -136,3 +138,4 @@ points are scored; the 3D hand fit is not.
 
 - `tools/e2e_test/run_e2e.py`: Unity force output -> relay -> Arduino parser, end to end (Linux only: g++, mono-mcs, pyserial).
 - `tools/test_dorsal_pressure.py`, `tools/test_link.cpp`, `tools/stepper_sim/`: relay model, serial parser and stepper sketch on the PC.
+- `python tools/actuator_model/pfl_model.py`: the P(F, L) model against its worked example.

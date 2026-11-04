@@ -11,12 +11,20 @@ so Unity finds the PC by itself.
 
 Dorsal actuators: Unity sends the dorsal torque T and the actuator length L per
 finger. The relay turns T into the wanted actuator force (T / --dorsal-arm) and
-runs the empirical actuator force model backwards (tools/dorsal_pressure.py,
-tools/actuator_model) to get the actuator PRESSURE that makes that force at that
-length. The Arduino turns pressure into stepper position.
-Unity sends L unclamped; this relay clamps it to the range the model file was
-calibrated for (model.length_domain_mm), so a refit model needs no Unity change.
-The status line shows "92>80" when that clamp is active.
+uses the P(F, L) model of the braided actuator (tools/dorsal_pressure.py,
+tools/actuator_model/pfl_model.py) to get the actuator PRESSURE that makes that
+force at that length. The Arduino turns pressure into stepper position.
+L is clamped to the range the model was fitted on (95-110 mm). The status line
+shows "92>95" when that clamp is active.
+
+Where L comes from (--length-source, or press L in this window to switch live):
+  unity     the L in Unity's packet: rest length + offset x tracked finger flexion
+            (GloveForceEsp32Output, the naive estimate)
+  external  "L,<thumb_mm>,<index_mm>" text packets on UDP --length-port (5013) from
+            any other program, e.g. the CV model (tools/send_actuator_length.py shows
+            the format and is a test sender). A finger whose external value is missing,
+            "nan" or older than --length-timeout falls back to Unity's L.
+The status line marks each L with u (Unity) or e (external).
 
 To the Arduino it sends one text line, RATE times per second (default 50):
 
@@ -40,8 +48,10 @@ Usage
     python glove_serial_bridge.py --list               # which COM port is the Mega?
     python glove_serial_bridge.py --port COM5
     python glove_serial_bridge.py --dry-run            # no Arduino: show the lines instead
+    python glove_serial_bridge.py --port COM5 --length-source external   # L from the CV model
 Options: --baud 115200  --rate 50  --timeout 0.2  --log run.csv  --quiet
-         --dorsal-arm 0.012  --rest-bar 1.0  --model-dir tools/actuator_model
+         --dorsal-arm 0.012  --rest-bar 1.0  --model tools/actuator_model/pfl_coefficients.json
+         --length-source unity|external  --length-port 5013  --length-timeout 0.5
 """
 import argparse
 import math
@@ -53,6 +63,7 @@ import time
 CMD_PORT, TLM_PORT, PROTOCOL_VERSION = 5011, 5012, 3       # GloveEsp32Protocol.cs
 CMD_FLOATS, TLM_FLOATS = 16, 16
 FAULT_LINK_LOST = 1 << 4
+LENGTH_PORT = 5013                                          # external actuator lengths (send_actuator_length.py)
 
 
 # ------------------------------------------------------------------ helpers
@@ -84,21 +95,121 @@ def make_line(seq, pads, bars):
 ZERO = [(0.0, 0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0, 0.0)]   # Unity silent: no force at all
 
 
-def dorsal_targets(dp, fingers, arm_m):
-    """Per finger: (wanted force N, length used mm, target bar, branch)."""
+def dorsal_targets(dp, fingers, arm_m, lengths=None):
+    """Per finger: (wanted force N, length used mm, target bar, branch).
+    lengths: the L to use per finger (default: the L in Unity's packet)."""
     out = []
     for i, (_, _, _, torque, length) in enumerate(fingers):
         force = torque / arm_m if arm_m > 0 else 0.0
-        bar, branch, used = dp.update(i, force, length)
+        bar, branch, used = dp.update(i, force, length if lengths is None else lengths[i])
         out.append((force, used, bar, branch))
     return out
 
 
-def fmt_length(sent, used):
-    """"80", or "92>80" when the model's range clamped what Unity sent."""
+def parse_lengths(data):
+    """'L,<thumb_mm>,<index_mm>' -> [thumb, index], None for a missing / nan / non-positive value.
+    Returns None if the packet is not a length packet."""
+    try:
+        parts = data.decode("ascii").strip().split(",")
+    except UnicodeDecodeError:
+        return None
+    if len(parts) != 3 or parts[0].strip().upper() != "L":
+        return None
+    out = []
+    for p in parts[1:]:
+        try:
+            v = float(p)
+        except ValueError:
+            v = float("nan")
+        out.append(v if math.isfinite(v) and v > 0 else None)
+    return out
+
+
+class ExternalLengths:
+    """Actuator lengths from another program (e.g. the CV model) on UDP LENGTH_PORT."""
+
+    def __init__(self, bind, port, timeout):
+        self.port, self.timeout = port, timeout
+        self.value, self.time = [None, None], [-1e9, -1e9]
+        self.packets = 0
+        self.error = ""
+        self.sock = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((bind, port))
+            s.setblocking(False)
+            self.sock = s
+        except OSError as e:
+            self.error = str(e)
+
+    def poll(self, now):
+        while self.sock is not None:
+            try:
+                data, _ = self.sock.recvfrom(256)
+            except (BlockingIOError, OSError):
+                break
+            vals = parse_lengths(data)
+            if vals is None:
+                continue
+            self.packets += 1
+            for i, v in enumerate(vals):
+                if v is not None:
+                    self.value[i], self.time[i] = v, now
+
+    def get(self, finger, now):
+        """Fresh external length (mm) for this finger, or None."""
+        if self.value[finger] is not None and now - self.time[finger] < self.timeout:
+            return self.value[finger]
+        return None
+
+    def age(self, now):
+        return now - max(self.time)
+
+
+class KeyPoller:
+    """Single key presses in this console window: Windows directly, elsewhere a key + Enter."""
+
+    def __init__(self):
+        self.mode = None
+        try:
+            import msvcrt   # noqa: F401
+            self.mode = "win"
+        except ImportError:
+            if sys.stdin is not None and sys.stdin.isatty():
+                self.mode = "tty"
+
+    def keys(self):
+        out = ""
+        if self.mode == "win":
+            import msvcrt
+            while msvcrt.kbhit():
+                out += msvcrt.getwch()
+        elif self.mode == "tty":
+            import select
+            while select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if not line:
+                    self.mode = None
+                    break
+                out += line
+        return out.lower()
+
+
+def choose_lengths(source, unity_l, ext, now):
+    """Per finger: (length to use, 'u' or 'e'). External only when chosen AND fresh."""
+    out = []
+    for i in (0, 1):
+        v = ext.get(i, now) if (source == "external" and ext is not None) else None
+        out.append((v, "e") if v is not None else (unity_l[i], "u"))
+    return out
+
+
+def fmt_length(sent, used, src=""):
+    """"95u", or "92>95u" when the model's range clamped the incoming length."""
     if isinstance(sent, float) and math.isfinite(sent) and abs(sent - used) < 0.5:
-        return "%.0f" % used
-    return "%s>%.0f" % (("%.0f" % sent) if isinstance(sent, float) and math.isfinite(sent) else "?", used)
+        return "%.0f%s" % (used, src)
+    return "%s>%.0f%s" % (("%.0f" % sent) if isinstance(sent, float) and math.isfinite(sent) else "?", used, src)
 
 
 def open_serial(port, baud, reset_wait):
@@ -118,9 +229,17 @@ def open_serial(port, baud, reset_wait):
 # --------------------------------------------------------------------- main
 def run(args):
     from dorsal_pressure import DorsalPressure, load_model
-    dp = DorsalPressure(load_model(args.model_dir), rest_bar=args.rest_bar)
+    dp = DorsalPressure(load_model(args.model), rest_bar=args.rest_bar)
     print("force model %s: L %g-%g mm, rest %.2f bar, dorsal arm %.4f m" % (
         dp.model.model_id, dp.l_min, dp.l_max, dp.rest_bar, args.dorsal_arm))
+    ext = ExternalLengths(args.length_bind, args.length_port, args.length_timeout)
+    if ext.sock is None:
+        print("external lengths: cannot listen on UDP %d (%s) -- Unity's L only" % (args.length_port, ext.error))
+    source = args.length_source
+    keys = KeyPoller()
+    print("dorsal length L from %s%s" % (
+        "Unity (naive flexion estimate)" if source == "unity" else "external program on UDP %d" % args.length_port,
+        "  -- press L%s to switch" % ("" if keys.mode == "win" else " + Enter") if keys.mode else ""))
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -141,8 +260,9 @@ def run(args):
 
     log = open(args.log, "w") if args.log else None
     if log:
-        log.write("t,seq,fresh,thP,thU,thV,thT,thL_sent_mm,thL_used_mm,thF_N,thBar,thBranch,"
-                  "ixP,ixU,ixV,ixT,ixL_sent_mm,ixL_used_mm,ixF_N,ixBar,ixBranch\n")
+        log.write("t,seq,fresh,len_source,"
+                  "thP,thU,thV,thT,thL_unity_mm,thL_ext_mm,thL_src,thL_used_mm,thF_N,thBar,thBranch,"
+                  "ixP,ixU,ixV,ixT,ixL_unity_mm,ixL_ext_mm,ixL_src,ixL_used_mm,ixF_N,ixBar,ixBranch\n")
 
     host, last_rx, arrival = None, -1e9, 0.0
     seq, trust, latest = 0, 0.0, ZERO
@@ -152,10 +272,19 @@ def run(args):
     rx_text = b""
     t0 = time.time()
     dorsal = dorsal_targets(dp, ZERO, args.dorsal_arm)   # rest, until the first send
+    lens = choose_lengths(source, [0.0, 0.0], ext, t0)
 
     try:
         while True:
             now = time.time()
+
+            # ---- keys and external lengths -------------------------------------------
+            if "l" in keys.keys():
+                source = "external" if source == "unity" else "unity"
+                print("\ndorsal length L now from %s" % (
+                    "Unity (naive flexion estimate)" if source == "unity" else "external program on UDP %d%s" % (
+                        args.length_port, "" if ext.sock is not None else " -- NOT LISTENING, Unity's L is used")))
+            ext.poll(now)
 
             # ---- Unity -> relay: keep the newest valid packet --------------------------
             # (Unity sends each packet twice, once per "board" -- both are this PC.)
@@ -182,7 +311,8 @@ def run(args):
                 next_send += period
                 if next_send < now:
                     next_send = now + period
-                dorsal = dorsal_targets(dp, targets, args.dorsal_arm)
+                lens = choose_lengths(source, [t[4] for t in targets], ext, now)
+                dorsal = dorsal_targets(dp, targets, args.dorsal_arm, [l for l, _ in lens])
                 line = make_line(seq, [t[:3] for t in targets], [d[2] for d in dorsal])
                 if ser is not None:
                     try:
@@ -201,9 +331,12 @@ def run(args):
                         print("-> " + line.strip())
                 if log:
                     cols = []
-                    for t, (force, used, bar, branch) in zip(targets, dorsal):
-                        cols += ["%.5f" % x for x in t[:4]] + ["%.2f" % t[4], "%.2f" % used, "%.4f" % force, "%.4f" % bar, branch]
-                    log.write("%.4f,%d,%d,%s\n" % (now - t0, seq, int(fresh), ",".join(cols)))
+                    for i, (t, (force, used, bar, branch)) in enumerate(zip(targets, dorsal)):
+                        e = ext.get(i, now)
+                        cols += ["%.5f" % x for x in t[:4]] + [
+                            "%.2f" % t[4], "%.2f" % e if e is not None else "", lens[i][1], "%.2f" % used,
+                            "%.4f" % force, "%.4f" % bar, branch]
+                    log.write("%.4f,%d,%d,%s,%s\n" % (now - t0, seq, int(fresh), source, ",".join(cols)))
 
             # ---- reconnect a lost port ---------------------------------------------------
             if ser is None and not args.dry_run and now >= next_open:
@@ -257,10 +390,16 @@ def run(args):
                 link = ("Unity %s" % host) if fresh else ("Unity silent -> zeros" if host or packets else "waiting for Unity")
                 port = args.port if ser is not None else ("%s DOWN" % args.port)
                 d = dorsal
-                print("\r[%s | %s] seq %d  thumb P %.2f F %.2f L %s %.2fbar | index P %.2f F %.2f L %s %.2fbar%s | %d lines   " % (
-                    link, port, seq, targets[0][0], d[0][0], fmt_length(targets[0][4], d[0][1]), d[0][2],
-                    targets[1][0], d[1][0], fmt_length(targets[1][4], d[1][1]), d[1][2], " " + d[1][3][:3] if d[1][2] < dp.rest_bar else "",
-                    lines_sent), end="", flush=True)
+                if source == "unity":
+                    lsrc = "L: Unity"
+                elif ext.packets == 0:
+                    lsrc = "L: ext, none yet"
+                else:
+                    lsrc = "L: ext %.0fms" % (1000 * ext.age(now))
+                print("\r[%s | %s | %s] seq %d  thumb P %.2f F %.2f L %s %.2fbar | index P %.2f F %.2f L %s %.2fbar%s | %d lines   " % (
+                    link, port, lsrc, seq, targets[0][0], d[0][0], fmt_length(lens[0][0], d[0][1], lens[0][1]), d[0][2],
+                    targets[1][0], d[1][0], fmt_length(lens[1][0], d[1][1], lens[1][1]), d[1][2],
+                    " " + d[1][3][:3] if d[1][2] < dp.rest_bar else "", lines_sent), end="", flush=True)
 
             if args.seconds and now - t0 > args.seconds:
                 break
@@ -306,7 +445,15 @@ def main():
                     help="moment arm (m) turning Unity's dorsal torque into actuator force; must match _dorsalGain")
     ap.add_argument("--rest-bar", type=float, default=1.0,
                     help="dorsal pressure meaning 'no force' (bar); must match P_REF_BAR in the Arduino sketch")
-    ap.add_argument("--model-dir", default=None, help="folder with actuator_force_model.py + coefficients (default tools/actuator_model)")
+    ap.add_argument("--model", default=None,
+                    help="P(F, L) coefficient file (default tools/actuator_model/pfl_coefficients.json)")
+    ap.add_argument("--length-source", choices=("unity", "external"), default="unity",
+                    help="where the dorsal actuator length L comes from at start (press L to switch while running)")
+    ap.add_argument("--length-port", type=int, default=LENGTH_PORT,
+                    help="UDP port for 'L,<thumb_mm>,<index_mm>' packets from another program")
+    ap.add_argument("--length-bind", default="0.0.0.0", help="address to listen on for external lengths")
+    ap.add_argument("--length-timeout", type=float, default=0.5,
+                    help="an external length older than this (s) falls back to Unity's L")
     ap.add_argument("--dry-run", action="store_true", help="no Arduino: print the lines")
     ap.add_argument("--list", action="store_true", help="list serial ports and exit")
     ap.add_argument("--quiet", action="store_true")

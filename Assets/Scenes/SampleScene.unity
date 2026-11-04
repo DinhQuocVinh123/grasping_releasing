@@ -2515,8 +2515,8 @@ MonoBehaviour:
   _thumbDorsalJoint: 1
   _indexDorsalJoint: 0
   _dorsalIgnoresSign: 1
-  _thumbDorsalRestLengthMm: 80
-  _indexDorsalRestLengthMm: 80
+  _thumbDorsalRestLengthMm: 95
+  _indexDorsalRestLengthMm: 95
   _dorsalLengthPerRadMm: 10
   _forceGain: 1
   _padForceGain: 0.4

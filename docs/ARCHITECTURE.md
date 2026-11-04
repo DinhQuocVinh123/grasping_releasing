@@ -65,10 +65,14 @@ splits it into stages from `glove_latency_*.csv`.
 
 ### 3. Relay to actuators (`tools/`, `arduino/`)
 
-The relay converts the dorsal torque into a target actuator pressure with the fitted actuator model
-(`tools/actuator_model/`, run backwards by `tools/dorsal_pressure.py`) and streams `H` lines to the Arduino Mega, which
+The relay converts the dorsal torque into a target actuator pressure with the P(F, L) model of the braided actuator
+(`tools/actuator_model/pfl_model.py`, used by `tools/dorsal_pressure.py`) and streams `H` lines to the Arduino Mega, which
 turns pressure into stepper positions (`arduino/glove_mega_steppers/`). Both sides fall back to rest pressure if their
 input stops for 200 ms.
+
+The actuator length L the model needs comes either from Unity (rest length + offset x tracked flexion, the default)
+or from another program sending `L,<thumb_mm>,<index_mm>` on UDP 5013 (`--length-source external`, or press L in the
+relay window to switch while running; `tools/send_actuator_length.py` is a test sender and documents the format).
 
 ## Script reference
 
@@ -145,6 +149,7 @@ hint rebuilt from the recorded hint. Several parameter sets can be compared in o
 | UDP 5005 | PC -> headset | Text packet `valid:..,fid:..,pv:x\|y;..,pc:..,tm:..` with the 9 points |
 | UDP 5011 | headset -> relay | 16 float32 force command, protocol version 3 |
 | UDP 5012 | relay -> headset | 16 float32 telemetry / announce |
+| UDP 5013 | any program -> relay | Text `L,<thumb_mm>,<index_mm>`: dorsal actuator lengths (external length source) |
 
 ## Logs written on the headset
 
