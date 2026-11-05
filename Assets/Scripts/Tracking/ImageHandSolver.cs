@@ -26,7 +26,7 @@ public sealed class ImageHandSolver : MonoBehaviour
     [Tooltip("Cutoff frequency with the hand still (Hz). Lower = smoother but more lag.")]
     [SerializeField] private float _minCutoff = 0.7f;
     [Tooltip("Extra cutoff per unit of wrist speed (Hz per m/s).")]
-    [SerializeField] private float _betaPosition = 200f;
+    [SerializeField] private float _betaPosition = 60f; // replay lab 31/10: 200 let the model's few-mm jitter open the filter
     [Tooltip("Extra cutoff per unit of wrist rotation speed (Hz per degree/s).")]
     [SerializeField] private float _betaRotation = 0.1f;
     [Tooltip("Extra cutoff per unit of finger joint speed (Hz per degree/s), per joint.")]
@@ -39,6 +39,41 @@ public sealed class ImageHandSolver : MonoBehaviour
     [SerializeField] private float _extrapolateRotation = 0.5f;
     [Tooltip("Extrapolate at most this long after the last solve (images arrive about every 0.06 s).")]
     [SerializeField] private float _maxExtrapolateSeconds = 0.06f;
+    [Header("Big turns (e.g. turning the palm over)")]
+    [Tooltip("The shown wrist turns at most this fast (degrees/s). Turning the palm over, the solver jumps 110-130 degrees in ONE image " +
+             "(it switches between the palm-down and palm-up reading); without a limit the shown hand snapped there in 1-2 images " +
+             "(glove_diag 31/10 18:21). 0 = no limit.")]
+    [SerializeField] private float _maxTurnSpeed = 0f;
+    [Tooltip("...and speeds up at most this fast (degrees/s per s), so a big turn starts smoothly instead of with a jerk. 0 = no limit.")]
+    [SerializeField] private float _turnAccel = 12000f;
+    // Replay lab 31/10 (7 recordings, 140 turns of > 90 degrees; tools/analysis/replay_lab_turns.py) with the two settings below:
+    // longest stall inside a turn 139-833 -> 14-347 ms (median 0-69 -> 0-14 ms), peak shown speed 815-2922 -> 596-775 deg/s,
+    // delay behind the solve 111-215 -> 83-181 ms; ordinary recordings: same fit, jitter and lag. A speed cap (_maxTurnSpeed 900)
+    // smoothed a little more but added delay, so it stays off.
+    [Tooltip("A big rotation change confirmed by the next image is taken at once by the per-image filter (the display above glides to " +
+             "it). Off: the filter starts slowly (its speed estimate is still low) and then whips: 10 -> 21 -> 64 -> 90 -> 123 degrees.")]
+    [SerializeField] private bool _commitConfirmedTurns = true;
+    [Tooltip("An unconfirmed rotation jump (waiting for the next image) is already followed this much (0..1) instead of not at all, so " +
+             "the hand starts turning at once; a wrong single-image flip then costs only this fraction of a wobble.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float _unconfirmedTurnFollow = 0.4f;
+
+    [Header("Pinch: fingertips stop at the skin")]
+    [Tooltip("The thumb's and index's last two segments may not come closer than this (m, centre line to centre line, at hand " +
+             "scale 1) = the two fingers' thickness on the glove mesh (GloveReplayLab.MeasureFingers 31/10: thumb tip 9.4 mm, index " +
+             "tip 7.3 mm). Closer -> both fingers are opened back along the open -> pinched path until they just touch. 0 = off.")]
+    [SerializeField] private float _tipSurfaceGap = 0.0165f;
+
+    [Header("Still hand: hide the model's jitter")]
+    [Tooltip("The shown wrist hangs on a 'rope' this long (m) behind the filtered result: changes smaller than this (the model's " +
+             "jitter with the hand held still) do not move it, a real motion pulls it along at once. 0 = off.")]
+    [SerializeField] private float _holdPosition = 0.004f;
+    [Tooltip("Same for the wrist rotation (degrees).")]
+    [SerializeField] private float _holdRotation = 2f;
+    [Tooltip("Same for each thumb / index joint angle (degrees).")]
+    [SerializeField] private float _holdAngle = 2.5f;
+    // Replay lab 31/10 (3 recordings, hand still < 2.5 cm/s): wrist drift ~20 -> ~13 mm/s, fingertips ~40 -> ~30 mm/s, high-frequency
+    // jitter median 0.7 -> 0.1 mm; cost: 2-5 mm more lag while moving. Larger holds: little less jitter, clearly more lag.
 
     [Header("Trust of each result")]
     [Tooltip("Image error (palm lengths) below this = fully trusted; above _errBad = rotation and fingers wait for a better result.")]
@@ -80,6 +115,24 @@ public sealed class ImageHandSolver : MonoBehaviour
     [Tooltip("ON: while the thumb or index pose is HELD (out of frame) -> ForceWeight goes to 0 and GloveForceEsp32Output's force gate fades " +
              "the force out (no pushing on a finger that is frozen).")]
     [SerializeField] private bool _cutForceWhenFingerFrozen = true;
+    [Header("Fingers hidden behind the hand (e.g. two fingers pointing forward)")]
+    [Tooltip("A finger whose points' mean confidence is below this counts as HIDDEN: its points leave the solve (wrong guesses would " +
+             "twist the wrist) and it keeps its pose. 0 = off.")]
+    [SerializeField] private float _hiddenFingerConfidence = 0.3f;
+    [Tooltip("...or whose chain on the image is longer than this many palm lengths (wrist point to index base): clearly seen fingers stay " +
+             "below ~1.0; with the fingers pointing forward the model scattered the thumb points over 2-3 (recording 31/10 15:17). 0 = off.")]
+    [SerializeField] private float _hiddenFingerImageLength = 1.4f;
+    [Tooltip("INDEX pointing along the camera ray: its last two segments shorter than this many palm lengths on the image (the model put " +
+             "the outer points on the fingertip ring, the only part it sees). Its two middle points then leave the solve and the tip point " +
+             "stays: replay lab on 31/10 15:17 (fingers pointing forward), shown hand vs the model's points on the image, median: palm " +
+             "0.33 -> 0.06, index tip 0.27 -> 0.04 palm lengths. Holding the finger straight as well fitted worse (0.11 / 0.09). " +
+             "Triggers on 63% of those images, under 0.2% of three ordinary recordings. 0 = off.")]
+    [SerializeField] private float _pointingTipPart = 0.2f;
+    [Tooltip("...not while the thumb tip (when seen) is this close to the index tip on the image (palm lengths): a pinch.")]
+    [SerializeField] private float _pointingPinchGap = 0.35f;
+    [Tooltip("With a finger hidden or pointing, the image is also accepted when the 3 palm points alone have at least this mean " +
+             "confidence (31/10 15:17: glove in view 94% >= 0.5, no glove in view 0%).")]
+    [SerializeField] private float _palmConfidenceWhenHidden = 0.5f;
 
     [Tooltip("When the solver switches to a different interpretation (e.g. the hand turned over), glide to the new pose over this time (s).")]
     [SerializeField] private float _switchSeconds = 0.2f;
@@ -145,6 +198,12 @@ public sealed class ImageHandSolver : MonoBehaviour
     private HandImageFit _fit;
     private Transform[] _between;      // bones between the wrist and the finger bases (e.g. the index metacarpal)
     private Quaternion[] _betweenRest;
+    private Transform[] _thumbChain = new Transform[0], _indexChain = new Transform[0]; // [root, .., distal, tip]
+    private readonly float[] _tipShown = new float[8], _tipOpen = new float[8];
+    private float _turnSpeed;                       // current shown turning speed (degrees/s, see _maxTurnSpeed)
+    private Vector3 _holdP;                         // the 'rope' end of the shown pose (_holdPosition / _holdRotation / _holdAngle)
+    private Quaternion _holdR = Quaternion.identity;
+    private readonly float[] _holdA = new float[8];
     private Transform[] _restJoints = new Transform[0]; // every XRHand_* joint below the wrist, and its rest local position
     private Vector3[] _restJointPos = new Vector3[0];
 
@@ -160,6 +219,11 @@ public sealed class ImageHandSolver : MonoBehaviour
     private readonly Vector3[] _gapJoints = new Vector3[HandImageFit.Points];
     /// <summary>Largest distance (mm) between an index bone just before rendering and where the solver put that joint (latest frame).</summary>
     public float RenderGapMm { get; private set; }
+    /// <summary>Distance (mm) between the thumb's and index's last segments before / after the pinch surface stop, and how far the
+    /// fingers were opened back (0 = not at all, 1 = fully to the open pose). Written by WriteBones.</summary>
+    public float TipGapRawMm { get; private set; }
+    public float TipGapMm { get; private set; }
+    public float TipOpenBack { get; private set; }
     /// <summary>...and what changed since WriteBones: largest index bone rotation (degrees), largest rotation of the bones between the
     /// wrist and the finger bases away from their rest pose (degrees), hand size (ratio - 1).</summary>
     public float RenderGapIndexDeg { get; private set; }
@@ -281,6 +345,11 @@ public sealed class ImageHandSolver : MonoBehaviour
     public float ForceWeight => _weight * _forceGate;
     public bool ThumbFrozen => _thumbFrozen;
     public bool IndexFrozen => _indexFrozen;
+    /// <summary>Latest image: thumb / index hidden (points dropped, pose held), index pointing along the camera ray (middle points dropped).</summary>
+    public bool ThumbHidden { get; private set; }
+    public bool IndexHidden { get; private set; }
+    public bool IndexPointing { get; private set; }
+
 
     /// <summary>Latest solve, for GloveFitDebugView: camera pose at capture, ray direction + weight of each of the
     /// 9 points (weight 0 = not used) and the raw solved joints (before filtering). Arrays must hold HandImageFit.Points.
@@ -358,6 +427,8 @@ public sealed class ImageHandSolver : MonoBehaviour
         _restJoints = joints.ToArray();
         _restJointPos = new Vector3[_restJoints.Length];
         for (int i = 0; i < _restJoints.Length; i++) _restJointPos[i] = _restJoints[i].localPosition;
+        _thumbChain = Chain(thumb.RootBone);
+        _indexChain = Chain(index.RootBone);
     }
 
     /// <summary>Builds the virtual hand for this frame (questPos/Rot = the wrist HandVisual has just written).
@@ -388,9 +459,11 @@ public sealed class ImageHandSolver : MonoBehaviour
         {
             if (!_hasDisp || _weight <= 0.001f)
             {
-                _dispP = _fP;
-                _dispR = _fR;
+                _dispP = _holdP = _fP;
+                _dispR = _holdR = _fR;
+                _turnSpeed = 0f;
                 System.Array.Copy(_fA, _dispA, 8);
+                System.Array.Copy(_fA, _holdA, 8);
                 _hasDisp = true;
             }
             else
@@ -408,9 +481,26 @@ public sealed class ImageHandSolver : MonoBehaviour
                 float aheadR = _extrapolateRotation * ahead;
                 Vector3 tgtP = _fP + _extrapolate * ahead * _fVel;
                 Quaternion tgtR = Quaternion.AngleAxis(_fAngVel.magnitude * aheadR, _fAngVel.normalized) * _fR;
-                _dispP = Vector3.Lerp(_dispP, tgtP, a);
-                _dispR = Quaternion.Slerp(_dispR, tgtR, a);
-                for (int k = 0; k < 8; k++) _dispA[k] = Mathf.Lerp(_dispA[k], _fA[k] + aheadR * _fVelA[k], a);
+                // Rope: the held pose only moves when the target gets further away than the rope length
+                Vector3 dP = tgtP - _holdP;
+                if (dP.magnitude > _holdPosition) _holdP = tgtP - dP.normalized * _holdPosition;
+                float dR = Quaternion.Angle(_holdR, tgtR);
+                if (dR > _holdRotation) _holdR = Quaternion.RotateTowards(_holdR, tgtR, dR - _holdRotation);
+                for (int k = 0; k < 8; k++)
+                {
+                    float tgtA = _fA[k] + aheadR * _fVelA[k];
+                    _holdA[k] = Mathf.Clamp(_holdA[k], tgtA - _holdAngle, tgtA + _holdAngle);
+                }
+                _dispP = Vector3.Lerp(_dispP, _holdP, a);
+                // Rotation: the same first-order follow (gap / tau per second), but capped in speed and acceleration (big turns glide)
+                float gapR = Quaternion.Angle(_dispR, _holdR);
+                float want = gapR / Mathf.Max(tau, 1e-3f);
+                if (_maxTurnSpeed > 0f) want = Mathf.Min(want, _maxTurnSpeed);
+                _turnSpeed = want > _turnSpeed && _turnAccel > 0f ? Mathf.MoveTowards(_turnSpeed, want, _turnAccel * dt) : want;
+                _dispR = _maxTurnSpeed > 0f || _turnAccel > 0f
+                    ? Quaternion.RotateTowards(_dispR, _holdR, _turnSpeed * dt)
+                    : Quaternion.Slerp(_dispR, _holdR, a);
+                for (int k = 0; k < 8; k++) _dispA[k] = Mathf.Lerp(_dispA[k], _holdA[k], a);
             }
             LagMm = Vector3.Distance(_dispP, _fit.Position) * 1000f;
             LagDeg = Quaternion.Angle(_dispR, _fit.Rotation);
@@ -447,14 +537,99 @@ public sealed class ImageHandSolver : MonoBehaviour
         float[] shown = _naturalFingerShape ? NaturalShape(_dispA) : _dispA;
         System.Array.Copy(shown, _writtenA, 8);
         _bonesWritten = wf > 0f;
-        _thumb.SetAngles(shown[0], shown[1], shown[2], shown[3]);
-        _index.SetAngles(shown[4], shown[5], shown[6], shown[7]);
-        _thumb.Apply(wf);
-        _index.Apply(wf);
+        SetFingers(_writtenA, wf);
+        if (wf > 0f) KeepTipsApart(_writtenA, wf);
         // What was just written, to see later what changed before rendering (CheckRenderGap)
         Transform ib = _index.RootBone;
         for (int j = 0; j < 3; j++) { _writtenIndexRot[j] = ib != null ? ib.localRotation : Quaternion.identity; ib = ib != null && ib.childCount > 0 ? ib.GetChild(0) : null; }
         _writtenScale = _wrist.lossyScale.x;
+    }
+
+    /// <summary>Replay lab: puts the wrist and the thumb / index bones in any HandImageFit pose (e.g. one of its starting guesses).</summary>
+    public void WriteSolverPose(Vector3 position, Quaternion rotation, float[] a)
+    {
+        _wrist.SetPositionAndRotation(position, rotation);
+        SetFingers(a, 1f);
+    }
+
+    private void SetFingers(float[] a, float wf)
+    {
+        _thumb.SetAngles(a[0], a[1], a[2], a[3]);
+        _index.SetAngles(a[4], a[5], a[6], a[7]);
+        _thumb.Apply(wf);
+        _index.Apply(wf);
+    }
+
+    /// <summary>Pinch surface stop: when the thumb's and index's last two segments are closer than the fingers' thickness
+    /// (_tipSurfaceGap), opens both fingers back towards HandImageFit's open pose just enough that they touch (bisection on the
+    /// open -> shown blend). The model sees the real fingertips together, but the virtual bones run through the middle of the fingers,
+    /// so following them exactly makes the skins pass through each other. a = the written angles, updated in place.</summary>
+    private void KeepTipsApart(float[] a, float wf)
+    {
+        TipOpenBack = 0f;
+        TipGapRawMm = TipGapMm = TipGap() * 1000f;
+        float minGap = _tipSurfaceGap * _wrist.lossyScale.x;
+        if (_tipSurfaceGap <= 0f || TipGapRawMm * 0.001f >= minGap) return;
+        System.Array.Copy(a, _tipShown, 8);
+        for (int k = 0; k < 8; k++) _tipOpen[k] = HandImageFit.OpenPoseAngle(k);
+        SetFingers(_tipOpen, wf);
+        if (TipGap() < minGap) { SetFingers(_tipShown, wf); return; } // even the open pose touches (odd thumb pose): leave it
+        float lo = 0f, hi = 1f; // fraction of the way from the open pose to the shown pose
+        for (int it = 0; it < 10; it++)
+        {
+            float mid = 0.5f * (lo + hi);
+            for (int k = 0; k < 8; k++) a[k] = Mathf.Lerp(_tipOpen[k], _tipShown[k], mid);
+            SetFingers(a, wf);
+            if (TipGap() >= minGap) lo = mid; else hi = mid;
+        }
+        for (int k = 0; k < 8; k++) a[k] = Mathf.Lerp(_tipOpen[k], _tipShown[k], lo);
+        SetFingers(a, wf);
+        TipOpenBack = 1f - lo;
+        TipGapMm = TipGap() * 1000f;
+    }
+
+    /// <summary>Smallest distance between the thumb's last two segments and the index's last two (centre lines, world, m).</summary>
+    private float TipGap()
+    {
+        float d = float.MaxValue;
+        for (int i = 1; i <= 2; i++)
+            for (int j = 1; j <= 2; j++)
+                d = Mathf.Min(d, SegmentDistance(_thumbChain[i].position, _thumbChain[i + 1].position,
+                                                 _indexChain[j].position, _indexChain[j + 1].position));
+        return d;
+    }
+
+    /// <summary>The chain from root down through first children: [root, child, grandchild, tip].</summary>
+    private static Transform[] Chain(Transform root)
+    {
+        var c = new Transform[4];
+        c[0] = root;
+        for (int i = 1; i < 4; i++) c[i] = c[i - 1] != null && c[i - 1].childCount > 0 ? c[i - 1].GetChild(0) : c[i - 1];
+        return c;
+    }
+
+    /// <summary>Distance between segments p1-q1 and p2-q2 (closest points, clamped to both segments).</summary>
+    private static float SegmentDistance(Vector3 p1, Vector3 q1, Vector3 p2, Vector3 q2)
+    {
+        Vector3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+        float a = Vector3.Dot(d1, d1), e = Vector3.Dot(d2, d2), f = Vector3.Dot(d2, r);
+        float s, t;
+        if (a < 1e-12f && e < 1e-12f) return r.magnitude;
+        if (a < 1e-12f) { s = 0f; t = Mathf.Clamp01(f / e); }
+        else
+        {
+            float c = Vector3.Dot(d1, r);
+            if (e < 1e-12f) { t = 0f; s = Mathf.Clamp01(-c / a); }
+            else
+            {
+                float b = Vector3.Dot(d1, d2), denom = a * e - b * b;
+                s = denom > 1e-12f ? Mathf.Clamp01((b * f - c * e) / denom) : 0f;
+                t = (b * s + f) / e;
+                if (t < 0f) { t = 0f; s = Mathf.Clamp01(-c / a); }
+                else if (t > 1f) { t = 1f; s = Mathf.Clamp01((b - c) / a); }
+            }
+        }
+        return (p1 + d1 * s - (p2 + d2 * t)).magnitude;
     }
 
     /// <summary>Display-only reshaping of the 8 finger angles (see _naturalFingerShape): index straight when the real finger is straight,
@@ -602,17 +777,39 @@ public sealed class ImageHandSolver : MonoBehaviour
             _w[i] = i == 1 ? c * _thumbBaseWeight : c;
         }
         EdgePoints = edge;
+        // Fingers hidden behind the hand (recording 31/10 15:17, two fingers pointing forward: thumb confidence ~0.25 dragged the mean
+        // under 0.5, every image was dropped, the hand stopped and the Quest hand took over although the palm was seen fine)
+        ThumbHidden = FingerHidden(1, 4);
+        IndexHidden = FingerHidden(5, 8);
+        IndexPointing = !IndexHidden && IndexPointsAlongRay(IndexPointing, !ThumbHidden);
+        int counted = 0;
         float meanConf = 0f;
-        for (int i = 0; i < N; i++) meanConf += _conf[i];
-        meanConf /= N;
-        if (meanConf < _minMeanConfidence || (_rejectEdgePoints && (inFrame < _minInFramePoints || palmIn == 0)))
+        for (int i = 0; i < N; i++)
+        {
+            bool drop = (ThumbHidden && i >= 2 && i <= 4) || (IndexHidden && i >= 6) || (IndexPointing && (i == 6 || i == 7));
+            if (drop)
+            {
+                _w[i] = 0f;
+                if (!IndexPointing || i < 6) _confIn[i] = 0f; // pointing: the confidences still rate the index (tip) seen
+                if (!_rejectEdgePoints || InFrame(_uv[i])) inFrame--;
+                continue;
+            }
+            meanConf += _conf[i];
+            counted++;
+        }
+        meanConf /= Mathf.Max(counted, 1);
+        bool partial = ThumbHidden || IndexHidden || IndexPointing;
+        bool glove = meanConf >= _minMeanConfidence ||
+                     (partial && (_conf[0] + _conf[1] + _conf[5]) / 3f >= _palmConfidenceWhenHidden);
+        int minIn = partial && palmIn == 3 ? Mathf.Min(_minInFramePoints, 3) : _minInFramePoints;
+        if (!glove || (_rejectEdgePoints && (inFrame < minIn || palmIn == 0)))
         {
             // Too few really visible points -> no solve (it would give a twisted hand); does not count as "hand seen"
             WristTrust = ThumbTrust = IndexTrust = 0f;
             return false;
         }
-        _thumbFrozen = _rejectEdgePoints && thumbIn < _minFingerPoints;
-        _indexFrozen = _rejectEdgePoints && indexIn < _minFingerPoints;
+        _thumbFrozen = (_rejectEdgePoints && thumbIn < _minFingerPoints) || ThumbHidden;
+        _indexFrozen = (_rejectEdgePoints && indexIn < _minFingerPoints) || IndexHidden;
 
         // Hand depth from the Quest AT CAPTURE TIME (hand centre = middle finger base), averaged over time
         if (hasHint)
@@ -670,6 +867,31 @@ public sealed class ImageHandSolver : MonoBehaviour
         if (LastTrust >= _rejectBelow) _lastGoodTime = now;
         SolvedFrameId = fid;
         return true;
+    }
+
+    /// <summary>Finger [first..last] (thumb 1-4, index 5-8) hidden: low mean confidence, or its chain on the image implausibly long
+    /// (the model guessing, points scattered).</summary>
+    private bool FingerHidden(int first, int last)
+    {
+        float conf = 0f, len = 0f;
+        for (int i = first; i <= last; i++) conf += _conf[i];
+        if (_hiddenFingerConfidence > 0f && conf / (last - first + 1) < _hiddenFingerConfidence) return true;
+        float palm = Vector2.Distance(_uv[0], _uv[5]);
+        if (palm < 1e-4f || _hiddenFingerImageLength <= 0f) return false;
+        for (int i = first; i < last; i++) len += Vector2.Distance(_uv[i], _uv[i + 1]);
+        return len > _hiddenFingerImageLength * palm;
+    }
+
+    /// <summary>Index pointing along the camera ray: its outer points collapsed onto the fingertip ring (tip seen). Once on, stays on
+    /// until the outer segments are twice the threshold (the measure hovers around it while pointing) or the tips meet in a pinch.</summary>
+    private bool IndexPointsAlongRay(bool wasPointing, bool thumbSeen)
+    {
+        if (_pointingTipPart <= 0f || _conf[8] < _minConfidence || (_rejectEdgePoints && !InFrame(_uv[8]))) return false;
+        float palm = Vector2.Distance(_uv[0], _uv[5]);
+        if (palm < 1e-4f) return false;
+        if (thumbSeen && Vector2.Distance(_uv[4], _uv[8]) <= _pointingPinchGap * palm) return false; // a hidden thumb's points often sit on the index tip
+        float tip = Vector2.Distance(_uv[6], _uv[7]) + Vector2.Distance(_uv[7], _uv[8]);
+        return tip < _pointingTipPart * (wasPointing ? 2f : 1f) * palm;
     }
 
     /// <summary>Trust from the image error (1 = good, 0 = too bad).</summary>
@@ -748,10 +970,19 @@ public sealed class ImageHandSolver : MonoBehaviour
         {
             float te = Mathf.Max(now - _fTimeR, 1e-3f);
             _fSpeedR = Mathf.Lerp(_fSpeedR, Quaternion.Angle(r, _fR) / te, OneEuroAlpha(te, _speedCutoff));
-            Quaternion newR = Quaternion.Slerp(_fR, r, OneEuroAlpha(te, _minCutoff + _betaRotation * _fSpeedR) * aR);
-            _fAngVel = Vector3.Lerp(_fAngVel, AngularVelocity(_fR, newR, te), 0.5f);
+            // A big change confirmed by consecutive images (a real turn, e.g. the palm turned over): take it at once; the display
+            // glides there (_maxTurnSpeed). No velocity from it: extrapolating a 120-degree jump would overshoot.
+            bool commit = _commitConfirmedTurns && confirmed && Quaternion.Angle(r, _fR) > _jumpDegrees;
+            Quaternion newR = commit ? r : Quaternion.Slerp(_fR, r, OneEuroAlpha(te, _minCutoff + _betaRotation * _fSpeedR) * aR);
+            _fAngVel = commit ? Vector3.zero : Vector3.Lerp(_fAngVel, AngularVelocity(_fR, newR, te), 0.5f);
             _fR = newR;
             _fTimeR = now;
+        }
+        else if (jump && _unconfirmedTurnFollow > 0f && rotTrust >= _rejectBelow)
+        {
+            // Unconfirmed jump: start turning towards it a little (no velocity, no speed estimate, time base kept)
+            _fR = Quaternion.Slerp(_fR, r, _unconfirmedTurnFollow);
+            _fAngVel = Vector3.zero;
         }
         else _fAngVel = Vector3.zero;
 

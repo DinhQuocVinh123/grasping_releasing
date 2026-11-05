@@ -47,6 +47,14 @@ public class FingerUDPReceiver : MonoBehaviour
     [SerializeField] private bool _keepOtherFingersClosed = true;
     [Tooltip("Curl angles of those fingers (degrees): base / middle / distal joint flexion.")]
     [SerializeField] private Vector3 _closedFingerAngles = new Vector3(75f, 95f, 60f);
+    [Tooltip("Sideways spread (degrees) of the middle / ring / little finger while curled. With one shared pose and no spread the thick " +
+             "glove fingers overlapped (middle and ring looked glued together).")]
+    [SerializeField] private Vector3 _closedFingerSpread = new Vector3(-3f, 16f, 26f); // spread BEFORE flexion (SpreadBeforeFlex), positive = towards the little
+    // finger. Replay lab 31/10: skin gap middle-ring (middle / distal segment) 7.8 / 5.4 -> 11.3 / 8.1 mm (ring 10 -> 16: still looked
+    // glued on the headset), ring-little 7.8 / 7.5 -> 7.0 / 6.7 mm, index-middle 5.7 mm.
+    [Tooltip("Extra curl (degrees, added to all three joints) of the middle / ring / little finger: a relaxed fist curls a bit more " +
+             "towards the little finger.")]
+    [SerializeField] private Vector3 _closedFingerExtraCurl = new Vector3(0f, 6f, 12f);
 
     // Thumb (0) and index (1) are built by ImageHandSolver; the other three are always curled.
     private const int NumLiveTrackedFingers = 2;
@@ -353,11 +361,20 @@ public class FingerUDPReceiver : MonoBehaviour
     private void KeepOtherFingersClosed()
     {
         if (!_keepOtherFingersClosed || _fitters == null) return;
-        for (int f = NumLiveTrackedFingers; f < _fitters.Length; f++)
+        CloseOtherFingers(_fitters);
+    }
+
+    /// <summary>Writes the curled pose of the middle, ring and little fingers (fitters [2], [3], [4]); also used by GloveReplayLab.</summary>
+    public void CloseOtherFingers(FingerChainFitter[] fitters)
+    {
+        for (int f = NumLiveTrackedFingers; f < fitters.Length && f < 5; f++)
         {
-            FingerChainFitter fitter = _fitters[f];
+            FingerChainFitter fitter = fitters[f];
             if (fitter == null) continue;
-            fitter.SetAngles(0f, _closedFingerAngles.x, _closedFingerAngles.y, _closedFingerAngles.z);
+            int k = f - NumLiveTrackedFingers;
+            float extra = _closedFingerExtraCurl[k];
+            fitter.SpreadBeforeFlex = true;
+            fitter.SetAngles(_closedFingerSpread[k], _closedFingerAngles.x + extra, _closedFingerAngles.y + extra, _closedFingerAngles.z + extra);
             fitter.Apply(1f);
         }
     }
@@ -437,7 +454,7 @@ public class FingerUDPReceiver : MonoBehaviour
             head.Append(",srqx,srqy,srqz,srqw,ra0,ra1,ra2,ra3,ra4,ra5,ra6,ra7");
             // Index bones just before the previous frame was rendered vs where the solver put those joints (mm; > a few mm = something
             // else moved the bones after us, e.g. HandVisual)
-            head.Append(",rgap_mm,rgap_idx_deg,rgap_meta_deg,rgap_scale");
+            head.Append(",rgap_mm,rgap_idx_deg,rgap_meta_deg,rgap_scale,tipgap_raw_mm,tipgap_mm,tip_open,thumb_hidden,index_hidden,index_pointing");
             _diag.WriteLine(head.ToString());
             Debug.Log($"[FingerUDPReceiver] Writing diagnostics to {path}", this);
         }
@@ -514,7 +531,13 @@ public class FingerUDPReceiver : MonoBehaviour
         sb.Append(',').Append((ok ? s.RenderGapMm : 0f).ToString("F1", inv))
           .Append(',').Append((ok ? s.RenderGapIndexDeg : 0f).ToString("F1", inv))
           .Append(',').Append((ok ? s.RenderGapBetweenDeg : 0f).ToString("F1", inv))
-          .Append(',').Append((ok ? s.RenderGapScale : 0f).ToString("F4", inv));
+          .Append(',').Append((ok ? s.RenderGapScale : 0f).ToString("F4", inv))
+          .Append(',').Append((ok ? s.TipGapRawMm : 0f).ToString("F1", inv))
+          .Append(',').Append((ok ? s.TipGapMm : 0f).ToString("F1", inv))
+          .Append(',').Append((ok ? s.TipOpenBack : 0f).ToString("F3", inv))
+          .Append(',').Append(ok && s.ThumbHidden ? 1 : 0)
+          .Append(',').Append(ok && s.IndexHidden ? 1 : 0)
+          .Append(',').Append(ok && s.IndexPointing ? 1 : 0);
         _diag.WriteLine(sb);
         if (Time.frameCount % 72 == 0) _diag.Flush(); // no data lost if the app is closed abruptly
     }

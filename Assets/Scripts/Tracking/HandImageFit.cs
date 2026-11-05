@@ -61,6 +61,17 @@ public sealed class HandImageFit
     // ...unless the current answer fits really badly (image error above this): then any better interpretation is taken at once
     // (a real turn-over was otherwise followed 2 images late, recording 29/10 18:45 image 884).
     public static float ReseedAnyError = 0.15f;
+    // Levenberg-Marquardt steps per starting guess (the replay lab lowers it to show the fit step by step).
+    public static int MaxIterations = 15;
+    /// <summary>Replay lab only (null on the headset): after each solve, every starting guess of that image refined 0..MaxIterations
+    /// steps -> (guess label, step, the 9 fitted points in world space, wrist position, wrist rotation, the 8 finger angles).
+    /// "A" = from the previous answer, "s,t" = finger seed, tilt seed.</summary>
+    public static System.Action<string, int, Vector3[], Vector3, Quaternion, float[]> TraceGuesses;
+    /// <summary>Replay lab only: while TraceGuesses refines the guess TraceRefineGuess all the way, every Levenberg-Marquardt attempt
+    /// -> (this fit, step, attempt, the 14 knobs before, the 14 knobs tried, residuals before, cost before, cost tried, lambda).</summary>
+    public static System.Action<HandImageFit, int, int, float[], float[], float[], float, float, float> TraceRefine;
+    public static string TraceRefineGuess = "0,5";
+    private bool _traceRefine;
     // Where the model's WRIST point (point 0) lies relative to the virtual hand's wrist joint (wrist frame, m). The model places it on
     // the glove cuff, below the joint (set by ImageHandSolver "Glove size").
     public static Vector3 WristPointLocal = Vector3.zero;
@@ -114,6 +125,8 @@ public sealed class HandImageFit
     public static float StraightBendFull = 8f, StraightBendZero = 15f;      // bend in the image (degrees) at point 7
     public static float StraightLenZero = 0.22f, StraightLenFull = 0.30f;   // (|6-7| + |7-8|) / |0-5| in the image
     public static float PosePriorWeight = 0.02f;     // per standard deviation (2 SD ~ 0.04 palm lengths of image error)
+    /// <summary>Mean open-hand angle k (thumb 0-3, index 4-7) of the pose prior: where ImageHandSolver opens a pinch back to.</summary>
+    public static float OpenPoseAngle(int k) => PoseMeanOpen[k];
     private static readonly float[] PoseMeanOpen = { 0.8791f, 4.2680f, 27.0197f, 0.9191f, 2.7536f, 11.5433f, 18.6156f, 1.0288f };
     private static readonly float[] PoseMeanPinch = { 7.0680f, 11.1249f, 38.0017f, 15.8167f, 2.2528f, 18.5744f, 47.1248f, 24.5913f };
     private static readonly float[,] PoseWhiten = // inverse Cholesky factor of the covariance matrix (unit: 1/degree)
@@ -419,8 +432,42 @@ public sealed class HandImageFit
         HasSolution = true;
         ImageError = ImageErrorOf(Position, Rotation, Angles);
         Depth = (_camInv * (_model[5] - _camPos)).z;
+        if (TraceGuesses != null) TraceAllGuesses(rotGuess, depth, warm);
         _useView2 = _useKnuckles = false;
         return true;
+    }
+
+    /// <summary>Replay lab: re-runs every starting guess of this image with 0, 1, 2 ... MaxIterations refinement steps (the result above
+    /// is already stored; this only reports). The guess from the previous answer keeps the temporal penalty, the seeds go without it,
+    /// as in Solve.</summary>
+    private void TraceAllGuesses(Quaternion rotGuess, float depth, bool warm)
+    {
+        int steps = MaxIterations;
+        bool temporal = _useTemporal;
+        var pts = new Vector3[Points];
+        for (int k = 0; k <= steps; k++)
+        {
+            MaxIterations = k;
+            if (warm)
+            {
+                _useTemporal = true;
+                RefineFrom(_prevP, _prevR, _prevA, out Vector3 p, out Quaternion r, _a8);
+                ComputePoints(p, r, _a8, pts);
+                TraceGuesses("A", k, pts, p, r, _a8);
+            }
+            _useTemporal = false;
+            for (int s = 0; s < FingerSeeds.GetLength(0); s++)
+                for (int t = 0; t < TiltSeeds.Length; t++)
+                {
+                    _traceRefine = TraceRefine != null && k == steps && s + "," + t == TraceRefineGuess;
+                    TrySeed(rotGuess, depth, s, t, out Vector3 p, out Quaternion r);
+                    _traceRefine = false;
+                    ComputePoints(p, r, _a8, pts);
+                    TraceGuesses(s + "," + t, k, pts, p, r, _a8);
+                }
+        }
+        MaxIterations = steps;
+        _useTemporal = temporal;
     }
 
     /// <summary>Which side of the index base line (points 5 -> 6) each model knuckle is on; knuckles too close to the line are dropped.</summary>
@@ -472,6 +519,16 @@ public sealed class HandImageFit
 
     /// <summary>The 9 joint positions of the current result (world), for drawing / checking.</summary>
     public void GetModelPoints(Vector3[] outPoints) => ComputePoints(Position, Rotation, Angles, outPoints);
+
+    /// <summary>Replay lab (inside TraceRefine): the 9 joint positions for the 14 knobs x of the guess being refined.</summary>
+    public void PointsOf(float[] x, Vector3[] outPoints)
+    {
+        ModelPoints(x, out _, out _);
+        System.Array.Copy(_model, outPoints, Points);
+    }
+
+    /// <summary>How far Refine nudges knob q to measure its effect (cm, degrees).</summary>
+    public static float NudgeOf(int q) => Step[q];
 
     /// <summary>The 9 joint positions for any wrist (p, r) and finger angles a[8].</summary>
     public void ComputePoints(Vector3 p, Quaternion r, float[] a, Vector3[] outPoints)
@@ -714,7 +771,7 @@ public sealed class HandImageFit
     {
         float cost = Evaluate(x, _r);
         float lambda = 1e-2f;
-        for (int iter = 0; iter < 15; iter++)
+        for (int iter = 0; iter < MaxIterations; iter++)
         {
             for (int q = 0; q < NP; q++)
             {
@@ -747,6 +804,7 @@ public sealed class HandImageFit
                 for (int a = 0; a < NP; a++) _trial[a] = x[a] + Mathf.Clamp(_sys[a, NP], -MaxStep[a], MaxStep[a]);
                 ClampAngles(_trial);
                 float trialCost = Evaluate(_trial, _rTry);
+                if (_traceRefine) TraceRefine(this, iter, attempt, x, _trial, _r, cost, trialCost, lambda);
                 if (trialCost < cost)
                 {
                     bool converged = cost - trialCost < 1e-7f;

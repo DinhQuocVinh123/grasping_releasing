@@ -32,6 +32,11 @@ public static class GloveReplayLab
     public static float Cam2QX = 0.00031f, Cam2QY = 0.004f, Cam2QZ = -0.00309f;
     public static float Cx2 = 642.1f, Cy2 = 640.5f;
     private const float DisplayHz = 72f;
+    /// <summary>Images TraceFrom..TraceTo: write out/trace.csv with every starting guess of HandImageFit refined step by step
+    /// (-labSets "trace:TraceFrom=520;TraceTo=530").</summary>
+    public static int TraceFrom = -1, TraceTo = -1;
+    /// <summary>With the trace: also write the virtual hand's mesh in each starting guess (before and after refining).</summary>
+    public static bool TraceMeshes = false;
 
     private static string Arg(string name, string fallback)
     {
@@ -103,6 +108,7 @@ public static class GloveReplayLab
         var inv = CultureInfo.InvariantCulture;
         var solver = Object.FindAnyObjectByType<ImageHandSolver>(FindObjectsInactive.Include);
         var so = new SerializedObject(solver);
+        var soRecv = new SerializedObject(solver.GetComponent<FingerUDPReceiver>());
         foreach (string a in assignments.Split(';'))
         {
             if (!a.Contains("=")) continue;
@@ -128,17 +134,22 @@ public static class GloveReplayLab
                 }
                 continue;
             }
-            var prop = so.FindProperty(key);
+            var prop = so.FindProperty(key) ?? soRecv.FindProperty(key); // ImageHandSolver, else FingerUDPReceiver
             if (prop == null) throw new System.Exception("khong co tham so " + key);
             switch (prop.propertyType)
             {
                 case SerializedPropertyType.Float: prop.floatValue = float.Parse(val, inv); break;
                 case SerializedPropertyType.Integer: prop.intValue = int.Parse(val, inv); break;
                 case SerializedPropertyType.Boolean: prop.boolValue = bool.Parse(val); break;
+                case SerializedPropertyType.Vector3: // "x,y,z"
+                    var v = val.Split(',');
+                    prop.vector3Value = new Vector3(float.Parse(v[0], inv), float.Parse(v[1], inv), float.Parse(v[2], inv));
+                    break;
                 default: throw new System.Exception("kieu tham so khong ho tro " + key);
             }
         }
         so.ApplyModifiedPropertiesWithoutUndo();
+        soRecv.ApplyModifiedPropertiesWithoutUndo();
     }
 
     private sealed class Rig
@@ -296,7 +307,7 @@ public static class GloveReplayLab
         sb.Append(",shown_err,raw_err");
         for (int i = 0; i < 9; i++) sb.Append($",rx{i},ry{i},rz{i}");
         for (int i = 0; i < 9; i++) sb.Append($",sx{i},sy{i},sz{i}");
-        sb.Append(",fscale");
+        sb.Append(",fscale,tipgap_raw_mm,tipgap_mm,tip_open,thumb_hidden,index_hidden,index_pointing");
         for (int i = 0; i < 9; i++) sb.Append($",bx{i},by{i},bz{i}");
         sb.Append('\n');
 
@@ -309,8 +320,14 @@ public static class GloveReplayLab
             skinned = new Vector3[restVerts.Length];
         }
         if (rig.Skin != null)
+        {
             using (var w = new BinaryWriter(File.Create(Path.Combine(outDir, "mesh_tris.bin"))))
                 foreach (int t in rig.Skin.sharedMesh.triangles) w.Write(t);
+            // Per vertex: the bone it follows most (int32 index into mesh_bones.txt), to colour the fingers apart when drawing
+            using (var w = new BinaryWriter(File.Create(Path.Combine(outDir, "mesh_vbone.bin"))))
+                foreach (var bw in rig.Skin.sharedMesh.boneWeights) w.Write(bw.boneIndex0);
+            File.WriteAllLines(Path.Combine(outDir, "mesh_bones.txt"), System.Array.ConvertAll(rig.Skin.bones, b => b != null ? b.name : "-"));
+        }
 
         var uv = new Vector2[9]; var dirs = new Vector3[9]; var conf = new float[9];
         var uv2 = new Vector2[9]; var dirs2 = new Vector3[9];
@@ -323,6 +340,19 @@ public static class GloveReplayLab
         double t0 = frames[0].T;
         float tDisp = 0f;
         int solved = 0, rendered = 0;
+        var disp = new StringBuilder("t,frame,shown,qx,qy,qz,qw,rqx,rqy,rqz,rqw\n"); // every rendered frame: shown + raw wrist rotation
+        var trace = new StringBuilder("frame,guess,step,err"); // TraceFrom..TraceTo: every starting guess, step by step
+        for (int i = 0; i < 9; i++) trace.Append($",u{i},v{i}");
+        trace.Append('\n');
+        var refine = new StringBuilder("step,attempt,lambda,cost,tried_cost,img_cost,img2_cost,depth,temporal,hyper,pose,hidden,knuckle,pinch");
+        for (int q = 0; q < 14; q++) refine.Append($",x{q}");
+        for (int q = 0; q < 14; q++) refine.Append($",t{q}");
+        for (int i = 0; i < 9; i++) refine.Append($",u{i},v{i}");
+        for (int i = 0; i < 9; i++) refine.Append($",tu{i},tv{i}");
+        refine.Append('\n');
+        var nudge = new StringBuilder("step,knob,nudge");
+        for (int i = 0; i < 9; i++) nudge.Append($",u{i},v{i}");
+        nudge.Append('\n');
         foreach (var f in frames)
         {
             float now = (float)(f.T - t0);
@@ -331,6 +361,7 @@ public static class GloveReplayLab
             {
                 tDisp += 1f / DisplayHz;
                 rig.Solver.StepDisplay(tDisp, 1f / DisplayHz);
+                LogDisplay(disp, rig, tDisp, f.Id);
             }
             bool ok = false;
             if (f.Found)
@@ -360,12 +391,78 @@ public static class GloveReplayLab
                     rig.Solver.SetSecondView(cam2, uv2, f.Conf2, dirs2);
                 }
                 rig.Solver.ApplyHandScale(); // as Drive does each frame (glove size; no left hand here)
+                int lastStep = HandImageFit.MaxIterations; // the trace lowers it while it runs
+                HandImageFit.TraceGuesses = f.Id >= TraceFrom && f.Id <= TraceTo ? (label, step, pts, gp, gr, ga) =>
+                {
+                    // The virtual hand itself in this guess (first and last step): mesh_FFFFF_guess_sK.bin, drawn like mesh_FFFFF.bin
+                    if (TraceMeshes && rig.Skin != null && (step == 0 || step == lastStep))
+                    {
+                        rig.Receiver.CloseOtherFingers(rig.Fitters);
+                        rig.Solver.WriteSolverPose(gp, gr, ga);
+                        Skin(rig.Skin, bindposes, weights, restVerts, skinned);
+                        using (var w = new BinaryWriter(File.Create(Path.Combine(outDir, $"mesh_{f.Id:D5}_{label.Replace(',', '_')}_s{step}.bin"))))
+                        {
+                            foreach (var c in skinned) { w.Write(c.x); w.Write(c.y); w.Write(c.z); }
+                            foreach (var b in rig.Skin.bones) { Vector3 c = b.position; w.Write(c.x); w.Write(c.y); w.Write(c.z); }
+                        }
+                    }
+                    var px = new Vector2[9];
+                    for (int i = 0; i < 9; i++) px[i] = ToPixel(pts[i]);
+                    trace.Append(f.Id).Append(',').Append(label.Replace(',', '_')).Append(',').Append(step)
+                         .Append(',').Append(PixelError(f, px).ToString("F4", inv));
+                    for (int i = 0; i < 9; i++)
+                        trace.Append(',').Append(px[i].x.ToString("F1", inv)).Append(',').Append(px[i].y.ToString("F1", inv));
+                    trace.Append('\n');
+                } : (System.Action<string, int, Vector3[], Vector3, Quaternion, float[]>)null;
+                // Image TraceFrom: one guess (HandImageFit.TraceRefineGuess) refined by hand -> refine.csv (every attempt: knobs,
+                // costs, points before / tried) and nudge.csv (the 9 points with each knob nudged, first attempt of each step)
+                HandImageFit.TraceRefine = f.Id == TraceFrom ? (fit, iter, attempt, x, tried, r, cost, triedCost, lambda) =>
+                {
+                    var pts = new Vector3[9];
+                    float img = 0f, img2 = 0f;
+                    for (int i = 0; i < 18; i++) { img += r[i] * r[i]; img2 += r[18 + i] * r[18 + i]; }
+                    refine.Append(iter).Append(',').Append(attempt).Append(',').Append(lambda.ToString("G4", inv)).Append(',')
+                          .Append(cost.ToString("G5", inv)).Append(',').Append(triedCost.ToString("G5", inv)).Append(',')
+                          .Append(img.ToString("G5", inv)).Append(',').Append(img2.ToString("G5", inv));
+                    // The rest of the cost, by rule (HandImageFit.Evaluate order): depth, temporal, hyperextension, pose prior,
+                    // hidden bend, knuckles, pinch
+                    int k0 = 36;
+                    foreach (int n in new[] { 1, 14, 6, 8, 2, 6, 3 })
+                    {
+                        float part = 0f;
+                        for (int i = k0; i < k0 + n; i++) part += r[i] * r[i];
+                        refine.Append(',').Append(part.ToString("G4", inv));
+                        k0 += n;
+                    }
+                    foreach (float v in x) refine.Append(',').Append(v.ToString("F3", inv));
+                    foreach (float v in tried) refine.Append(',').Append(v.ToString("F3", inv));
+                    foreach (var knobs in new[] { x, tried })
+                    {
+                        fit.PointsOf(knobs, pts);
+                        foreach (var p in pts) { Vector2 q = ToPixel(p); refine.Append(',').Append(q.x.ToString("F1", inv)).Append(',').Append(q.y.ToString("F1", inv)); }
+                    }
+                    refine.Append('\n');
+                    if (attempt > 0) return;
+                    var nudged = new float[x.Length];
+                    for (int q = 0; q < x.Length; q++)
+                    {
+                        System.Array.Copy(x, nudged, x.Length);
+                        nudged[q] += HandImageFit.NudgeOf(q);
+                        fit.PointsOf(nudged, pts);
+                        nudge.Append(iter).Append(',').Append(q).Append(',').Append(HandImageFit.NudgeOf(q).ToString("F2", inv));
+                        foreach (var p in pts) { Vector2 u = ToPixel(p); nudge.Append(',').Append(u.x.ToString("F2", inv)).Append(',').Append(u.y.ToString("F2", inv)); }
+                        nudge.Append('\n');
+                    }
+                } : (System.Action<HandImageFit, int, int, float[], float[], float[], float, float, float>)null;
                 ok = rig.Solver.SolveImage(now, f.Id, cam, uv, conf, dirs, f.HasHint, f.Hint);
+                HandImageFit.TraceGuesses = null;
+                HandImageFit.TraceRefine = null;
                 if (ok) solved++;
             }
             // The first rendered frame after this image arrived
             tDisp += 1f / DisplayHz;
             rig.Solver.StepDisplay(tDisp, 1f / DisplayHz);
+            LogDisplay(disp, rig, tDisp, f.Id);
             if (f.Id < from || f.Id > to) continue;
 
             bool shown = rig.Solver.TryGetShownWrist(out Vector3 dp, out Quaternion dq);
@@ -409,6 +506,10 @@ public static class GloveReplayLab
                       .Append(',').Append(arr[i].z.ToString("F4", inv));
             // Raw solve's virtual joints (no point offsets) + size, for tools/analysis/calibrate_glove_points.py
             sb.Append(',').Append(rig.Solver.RawScale.ToString("F4", inv));
+            foreach (float v in new[] { rig.Solver.TipGapRawMm, rig.Solver.TipGapMm, rig.Solver.TipOpenBack })
+                sb.Append(',').Append((shown ? v : -1f).ToString("F2", inv));
+            sb.Append(',').Append(f.Found && rig.Solver.ThumbHidden ? 1 : 0).Append(',').Append(f.Found && rig.Solver.IndexHidden ? 1 : 0)
+              .Append(',').Append(f.Found && rig.Solver.IndexPointing ? 1 : 0);
             bool hasBones = rig.Solver.TryGetRawJoints(bones);
             for (int i = 0; i < 9; i++)
                 sb.Append(',').Append(hasBones ? bones[i].x.ToString("F4", inv) : "").Append(',').Append(hasBones ? bones[i].y.ToString("F4", inv) : "")
@@ -428,6 +529,13 @@ public static class GloveReplayLab
             }
         }
         File.WriteAllText(Path.Combine(outDir, "frames.csv"), sb.ToString());
+        File.WriteAllText(Path.Combine(outDir, "display.csv"), disp.ToString());
+        if (TraceFrom >= 0)
+        {
+            File.WriteAllText(Path.Combine(outDir, "trace.csv"), trace.ToString());
+            File.WriteAllText(Path.Combine(outDir, "refine.csv"), refine.ToString());
+            File.WriteAllText(Path.Combine(outDir, "nudge.csv"), nudge.ToString());
+        }
         shownErrs.Sort();
         float Pc(float q) => shownErrs.Count > 0 ? shownErrs[Mathf.Min(shownErrs.Count - 1, (int)(q * shownErrs.Count))] : -1f;
         gaps.Sort();
@@ -436,14 +544,22 @@ public static class GloveReplayLab
             Path.GetFileName(recDir), frames.Count, solved, rendered, rig.Solver.Switches, rig.Solver.Reseeds, Pc(0.5f), Pc(0.9f), Pc(0.98f), gapMed);
     }
 
+    /// <summary>One rendered frame for display.csv: the shown wrist rotation and the latest raw solve (to measure how smoothly big
+    /// turns such as turning the palm over are shown).</summary>
+    private static void LogDisplay(StringBuilder sb, Rig rig, float t, int frame)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        bool shown = rig.Solver.TryGetShownWrist(out _, out Quaternion q);
+        Quaternion r = rig.Solver.RawRotation;
+        sb.Append(t.ToString("F4", inv)).Append(',').Append(frame).Append(',').Append(shown ? 1 : 0);
+        foreach (float v in new[] { q.x, q.y, q.z, q.w, r.x, r.y, r.z, r.w }) sb.Append(',').Append(v.ToString("F5", inv));
+        sb.Append('\n');
+    }
+
     /// <summary>Writes the shown pose to the bones like the headset (the Quest hand plays no part: it is given the shown wrist).</summary>
     private static void WritePose(Rig rig, Vector3 p, Quaternion q)
     {
-        for (int f = 2; f < 5; f++)
-        {
-            rig.Fitters[f].SetAngles(0f, rig.Closed.x, rig.Closed.y, rig.Closed.z);
-            rig.Fitters[f].Apply(1f);
-        }
+        rig.Receiver.CloseOtherFingers(rig.Fitters);
         rig.Solver.WriteBones(p, q);
     }
 
@@ -479,6 +595,108 @@ public static class GloveReplayLab
 
     private static Vector2 ToPixel(Vector3 c) =>
         c.z > 1e-3f ? new Vector2(Cx + c.x / c.z * Fx, Cy - c.y / c.z * Fy) : new Vector2(-1f, -1f);
+
+    /// <summary>Soft cube check (batch: -executeMethod GloveReplayLab.SoftTest -labOut dir): presses the index fingertip into the top of
+    /// "SoftCube" at several real depths; per depth: how deep the virtual fingertip may sink (PhysicsPinchGrabbable.ResolvePoint, what
+    /// FingertipSurfaceConstraint uses) and how deep the mesh dents (SoftBodyDent). Writes soft_dXX.bin (dented mesh vertices in world
+    /// space, float32 x,y,z, then the fingertip) and soft_tris.bin (int32) for drawing.</summary>
+    public static void SoftTest()
+    {
+        string report;
+        try
+        {
+            string outDir = Arg("-labOut", "soft_test");
+            Directory.CreateDirectory(outDir);
+            EditorSceneManager.OpenScene("Assets/Scenes/SampleScene.unity");
+            GameObject soft = null;
+            foreach (var t in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                if (t.name == "SoftCube") soft = t.gameObject;
+            if (soft == null) throw new System.Exception("SoftCube not found");
+            var body = soft.GetComponent<PhysicsPinchGrabbable>();
+            var dent = soft.GetComponent<SoftBodyDent>();
+            var tips = new List<Transform>();
+            body.GetFingertips(tips);
+            if (tips.Count == 0) throw new System.Exception("SoftCube has no fingertips");
+            Transform tip = tips[tips.Count > 1 ? 1 : 0];
+            dent.Init();
+            var mf = soft.GetComponent<MeshFilter>();
+            using (var w = new BinaryWriter(File.Create(Path.Combine(outDir, "soft_tris.bin"))))
+                foreach (int i in mf.sharedMesh.triangles) w.Write(i);
+            const float r = 0.008f; // PhysicsPinchGrabbable._fingerRadius
+            Vector3 top = soft.transform.TransformPoint(new Vector3(0.1f, 0.5f, -0.1f)), n = soft.transform.up;
+            var sb = new StringBuilder();
+            foreach (float real in new[] { 0f, 0.003f, 0.006f, 0.01f, 0.015f, 0.02f, 0.03f })
+            {
+                Vector3 realTip = top + n * (r - real);                     // real fingertip centre: skin `real` m inside
+                Vector3 shownTip = body.ResolvePoint(realTip, r, out Vector3 res) ? res : realTip;
+                float sink = r - Vector3.Dot(shownTip - top, n);            // virtual skin depth below the rest surface
+                tip.position = shownTip;
+                for (int k = 0; k < 40; k++) dent.Step(1f / 72f);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "real {0,4:F1} mm -> virtual fingertip sinks {1,4:F1} mm, dent {2,4:F1} mm\n",
+                    real * 1000f, sink * 1000f, dent.DentMeters * 1000f);
+                using (var w = new BinaryWriter(File.Create(Path.Combine(outDir, $"soft_d{Mathf.RoundToInt(real * 1000f):D2}.bin"))))
+                {
+                    foreach (var v in mf.sharedMesh.vertices) { Vector3 q = soft.transform.TransformPoint(v); w.Write(q.x); w.Write(q.y); w.Write(q.z); }
+                    w.Write(tip.position.x); w.Write(tip.position.y); w.Write(tip.position.z);
+                }
+            }
+            tip.position = top + n * 0.05f;                                 // finger away: springs back
+            for (int k = 0; k < 72; k++) dent.Step(1f / 72f);
+            sb.AppendFormat(CultureInfo.InvariantCulture, "finger away 1 s -> dent {0:F2} mm\n", dent.DentMeters * 1000f);
+            report = sb.ToString();
+        }
+        catch (System.Exception e) { report = "LOI: " + e; }
+        Debug.Log("[GloveReplayLab] " + report);
+        if (Application.isBatchMode) EditorApplication.Exit(report.StartsWith("LOI") ? 1 : 0);
+    }
+
+    /// <summary>Thickness of the glove hand mesh around each finger's last segment (rest pose, hand scale 1): per finger, the
+    /// distance of the vertices skinned mostly to the distal bone from the bone's centre line (median / p90 / max), and how far the
+    /// mesh reaches past the tip joint. Used for ImageHandSolver._tipSurfaceGap.</summary>
+    public static void MeasureFingers()
+    {
+        string report;
+        try
+        {
+            var rig = BuildRig();
+            var smr = rig.Skin;
+            var mesh = smr.sharedMesh;
+            var verts = new Vector3[mesh.vertexCount];
+            Skin(smr, mesh.bindposes, mesh.boneWeights, mesh.vertices, verts);
+            var bw = mesh.boneWeights;
+            var sb = new StringBuilder();
+            sb.AppendFormat("wrist lossy scale {0:F3}\n", rig.Wrist.lossyScale.x);
+            float scale = rig.Wrist.lossyScale.x;
+            string[] names = { "thumb", "index", "middle", "ring", "little" };
+            for (int f = 0; f < 5; f++)
+            {
+                Transform distal = rig.Fitters[f].RootBone;
+                while (distal.childCount > 0 && distal.GetChild(0).childCount > 0) distal = distal.GetChild(0);
+                Transform tip = distal.GetChild(0);
+                int bi = System.Array.IndexOf(smr.bones, distal);
+                Vector3 a = distal.position, b = tip.position, ax = (b - a).normalized;
+                var radii = new List<float>();
+                float beyond = 0f;
+                for (int v = 0; v < verts.Length; v++)
+                {
+                    if (bw[v].boneIndex0 != bi || bw[v].weight0 < 0.5f) continue;
+                    float t = Vector3.Dot(verts[v] - a, ax);
+                    beyond = Mathf.Max(beyond, t - (b - a).magnitude);
+                    if (t < 0f || t > (b - a).magnitude) continue;
+                    radii.Add(Vector3.Cross(verts[v] - a, ax).magnitude);
+                }
+                radii.Sort();
+                if (radii.Count == 0) { sb.AppendFormat("{0}: no vertices (bone index {1})\n", names[f], bi); continue; }
+                sb.AppendFormat(CultureInfo.InvariantCulture, "{0}: segment {1:F1} mm, radius med {2:F1} p90 {3:F1} max {4:F1} mm, mesh past tip {5:F1} mm ({6} verts)\n",
+                    names[f], (b - a).magnitude / scale * 1000f, radii[radii.Count / 2] / scale * 1000f, radii[(int)(0.9f * radii.Count)] / scale * 1000f,
+                    radii[radii.Count - 1] / scale * 1000f, beyond / scale * 1000f, radii.Count);
+            }
+            report = sb.ToString();
+        }
+        catch (System.Exception e) { report = "LOI: " + e; }
+        Debug.Log("[GloveReplayLab] " + report);
+        if (Application.isBatchMode) EditorApplication.Exit(0);
+    }
 
     /// <summary>Prints what the lab needs to know about the scene's glove hand mesh (bones bound? deforms when baked?).</summary>
     public static void Probe()

@@ -52,8 +52,9 @@ splits it into stages from `glove_latency_*.csv`.
 
 ### 2. Virtual hand to force (`Interaction/`, `Haptics/`)
 
-1. **SquishyPinchable** (soft ball) and **PhysicsPinchGrabbable** (rigid cube) decide when the hand grabs and releases
-   them and how far they are compressed.
+1. **SquishyPinchable** (soft ball) and **PhysicsPinchGrabbable** (cube, rigid or soft) decide when the hand grabs and
+   releases them and how far they are compressed. A PhysicsPinchGrabbable with a *soft depth* lets the virtual fingertip sink
+   into it (up to that depth, growing with the real finger's depth); **SoftBodyDent** dents its mesh under the fingertips.
 2. **HapticRenderer** measures how deep each *real* fingertip is inside an object (god-object method: the virtual
    finger stays on the surface, the gap to the real finger is the force), turns it into a 0..1 pressure plus short
    pulses on touch / grab / release, and sends them to every `IHapticGlove` output (controller vibration, fingertip
@@ -103,13 +104,20 @@ hint rebuilt from the recorded hint. Several parameter sets can be compared in o
   with the second camera (`kpts2`) the 3D error against the triangulated glove points.
 - `tools/analysis/replay_lab_render.py <out>/<set>/<recording> <recording dir>`: draws the shown virtual hand (skinned
   mesh) over the camera image plus a side view, per frame or as a grid.
+- `tools/analysis/replay_lab_jitter.py <out>`: jitter of the shown hand while still and its error while moving (lag).
+- `tools/analysis/replay_lab_turns.py <out>`: how smoothly big turns (turning the palm over) are shown, from the per-rendered-frame
+  `display.csv`: delay, longest stall, peak turning speed.
+- `GloveReplayLab.MeasureFingers` (finger thickness of the glove mesh) and `GloveReplayLab.SoftTest` (presses a fingertip into
+  the soft cube: sink and dent depth) are one-off checks run the same way.
 
 ### Interaction
 
 | Script | Order | What it does |
 |---|---|---|
 | `SquishyPinchable` | 100 | Soft deformable object: dents, grab / release with two fingers, symmetric pinch |
-| `PhysicsPinchGrabbable` | 100 | Rigid physics object: antipodal grab, throw on release |
+| `PhysicsPinchGrabbable` | 100 | Physics object: antipodal grab, throw on release; optional soft depth (fingertips sink in) |
+| `SoftBodyDent` | 300 | Dents a soft PhysicsPinchGrabbable's mesh (subdivided box) under the fingertips, springs back slowly |
+| `GloveSceneSetup` (Editor) | - | Scene edits done by code, e.g. `AddSoftCube` (the pink soft cube next to the PhysicsCube) |
 | `FingertipSurfaceConstraint` | 200 | Keeps virtual fingers on object surfaces; parallel fingertips when pinching a ball |
 | `SqueezeCueTint` | 300 | Object turns red when the real fingers squeeze past its maximum compression |
 | `FingertipColorCue` | 350 | Fingertips turn red with force (an `IHapticGlove` output) |

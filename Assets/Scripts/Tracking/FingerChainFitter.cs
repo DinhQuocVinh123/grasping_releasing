@@ -77,6 +77,11 @@ public sealed class FingerChainFitter
         _max = isThumb ? new[] { 35f, 45f, 70f, 85f } : new[] { FingerSpreadLimit, 95f, 110f, 90f };
     }
 
+    /// <summary>false (default): the base flexes first, then spreads about the hand's spread axis -- with the base bent ~90 degrees that
+    /// axis runs along the finger, so "spread" only twists it. true: spread first, then flex -- the sideways offset stays when the
+    /// finger curls (used for the curled middle / ring / little fingers, which otherwise lay side by side touching).</summary>
+    public bool SpreadBeforeFlex { get; set; }
+
     public float MinAngle(int p) => _min[p];
     public float MaxAngle(int p) => _max[p];
     public bool IsThumb => _isThumb;
@@ -127,7 +132,8 @@ public sealed class FingerChainFitter
 
     private Quaternion LocalDelta(int bone, float[] a) => bone switch
     {
-        0 => Quaternion.AngleAxis(a[0], _spreadAxis) * Quaternion.AngleAxis(a[1], _flexAxis[0]),
+        0 => SpreadBeforeFlex ? Quaternion.AngleAxis(a[1], _flexAxis[0]) * Quaternion.AngleAxis(a[0], _spreadAxis)
+                              : Quaternion.AngleAxis(a[0], _spreadAxis) * Quaternion.AngleAxis(a[1], _flexAxis[0]),
         1 => Quaternion.AngleAxis(a[2], _flexAxis[1]),
         _ => Quaternion.AngleAxis(a[3], _flexAxis[2]),
     };
