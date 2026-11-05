@@ -192,7 +192,8 @@ public class HapticRenderer : MonoBehaviour
         state.touchedObject = touching ? deepest : null;
         _touchedTarget[f] = touching ? target : null;
         // Rigid cube: maximum compression = 0 -> force rises from 0 to full over the material's Extra Depth To Full Pressure.
-        float maxIndent = deepest != null ? deepest.MaxIndentMeters : 0f;
+        // Soft physics object (PhysicsPinchGrabbable with a soft depth): a spring up to that depth, like the ball.
+        float maxIndent = deepest != null ? deepest.MaxIndentMeters : contact.cube != null ? contact.cube.SoftDepth : 0f;
         state.pressure01 = touching && target != null
             ? MaterialOf(target).PressureFromDepth(depth, maxIndent)
             : 0f;

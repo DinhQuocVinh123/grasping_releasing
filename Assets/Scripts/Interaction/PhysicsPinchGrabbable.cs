@@ -52,6 +52,12 @@ public class PhysicsPinchGrabbable : MonoBehaviour
     [SerializeField] private float _throwWindow = 0.1f;
     [SerializeField] private float _throwScale = 1f;
 
+    [Header("Soft object (0 = rigid)")]
+    [Tooltip("How deep (m) the virtual fingertip may sink into the surface when the real finger presses in (foam). The sink grows " +
+             "with how deep the REAL finger is and levels off at this value. 0 = rigid: the virtual finger stops at the surface. " +
+             "Add SoftBodyDent to dent the mesh under the fingertips.")]
+    [SerializeField] private float _softDepth = 0f;
+
     [Header("Return home")]
     [Tooltip("Start / reset position. Empty = the position at start.")]
     [SerializeField] private Transform _home;
@@ -61,6 +67,24 @@ public class PhysicsPinchGrabbable : MonoBehaviour
     public static readonly List<PhysicsPinchGrabbable> Active = new List<PhysicsPinchGrabbable>();
 
     public bool IsHeld => _heldBy >= 0;
+    /// <summary>Maximum sink of a fingertip into the surface (m); 0 = rigid.</summary>
+    public float SoftDepth => _softDepth;
+
+    /// <summary>The thumb and index tip transforms of every hand that can touch this object (for SoftBodyDent).</summary>
+    public void GetFingertips(List<Transform> tips)
+    {
+        tips.Clear();
+        foreach (var h in _hands)
+        {
+            if (h.thumbTip != null && h.thumbTip.gameObject.activeInHierarchy) tips.Add(h.thumbTip);
+            if (h.indexTip != null && h.indexTip.gameObject.activeInHierarchy) tips.Add(h.indexTip);
+        }
+    }
+
+    /// <summary>How far the virtual skin sinks in for a REAL skin depth (m): grows with it, levels off at _softDepth, never deeper
+    /// than the real finger.</summary>
+    private float Sink(float realDepth) =>
+        _softDepth <= 0f || realDepth <= 0f ? 0f : _softDepth * (1f - Mathf.Exp(-realDepth / _softDepth));
 
     private Rigidbody _rb;
     private Collider _collider;
@@ -397,6 +421,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
     public Vector3 ClosestSurfacePoint(Vector3 world, out bool inside)
     {
         inside = false;
+        if (_collider == null) _collider = GetComponent<Collider>(); // outside Play mode (Editor tests) Awake has not run
         if (_collider is BoxCollider box)
         {
             Transform t = box.transform;
@@ -479,7 +504,8 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         if (!inside && d.sqrMagnitude >= radius * radius) return false;
         Vector3 outward = inside ? -d : d;
         outward = outward.sqrMagnitude > 1e-12f ? outward.normalized : OutwardNormal(point);
-        resolved = s + outward * radius;
+        float skinDepth = inside ? d.magnitude + radius : radius - d.magnitude; // how deep the real finger surface is
+        resolved = s + outward * (radius - Sink(skinDepth));
         return true;
     }
 
@@ -497,7 +523,7 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         int axis = face / 2;
         float sign = (face & 1) == 1 ? 1f : -1f;
         float depth = (half[axis] - sign * p[axis]) * Mathf.Abs(t.lossyScale[axis]); // metres from the point to the chosen face
-        resolved = point + FaceNormal(face) * (depth + radius);
+        resolved = point + FaceNormal(face) * (depth + radius - Sink(depth + radius));
         return true;
     }
 
@@ -513,17 +539,24 @@ public class PhysicsPinchGrabbable : MonoBehaviour
         // UpdateHeld's job (a clear opening for _releaseDelay). Previously a gap over 3 cm let the virtual finger open
         // and then snap back the next frame -> the thumb kept opening and closing.
         if (face < 0 && SkinDistance(visualTip) > 0.03f) return false;
+        // Soft: both fingers sink in by the squeeze of the real hand (half the gap missing to the object width)
+        float sink = 0f;
+        if (_softDepth > 0f)
+        {
+            float gap = Vector3.Distance(Tracked(_hands[_heldBy].thumbTip), Tracked(_hands[_heldBy].indexTip));
+            sink = Sink(0.5f * (ObjectWidthBetweenFingers(_heldBy) - gap));
+        }
         contact = face >= 0
-            ? _collider.transform.TransformPoint(_heldPoint[finger]) + FaceNormal(face) * _fingerRadius
-            : SurfacePlusFinger(visualTip);
+            ? _collider.transform.TransformPoint(_heldPoint[finger]) + FaceNormal(face) * (_fingerRadius - sink)
+            : SurfacePlusFinger(visualTip, sink);
         return true;
     }
 
-    private Vector3 SurfacePlusFinger(Vector3 p)
+    private Vector3 SurfacePlusFinger(Vector3 p, float sink)
     {
         Vector3 s = ClosestSurfacePoint(p, out bool inside);
         Vector3 outward = inside ? s - p : p - s;
         if (outward.sqrMagnitude < 1e-12f) outward = s - _collider.bounds.center;
-        return s + outward.normalized * _fingerRadius;
+        return s + outward.normalized * (_fingerRadius - sink);
     }
 }
